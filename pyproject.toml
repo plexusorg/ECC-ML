@@ -3,11 +3,11 @@ name = "module-ecc"
 version = "0.1.0"
 description = "Data and model pipeline for Module-ECC chat safety"
 requires-python = ">=3.13"
+# No module imports gguf, protobuf or sentencepiece: llama.cpp's convert_hf_to_gguf.py, which `uv run export` runs in
+# this environment, needs them.
 dependencies = [
-    "accelerate>=1.15.0",
     "boto3>=1.43.123",
     "gguf>=0.19.0",
-    "jinja2>=3.1.6",
     "numpy>=2.5.4",
     "pandas>=3.1.0",
     "peft==0.21.2",

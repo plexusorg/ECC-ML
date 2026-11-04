@@ -671,10 +671,8 @@ name = "module-ecc"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "accelerate" },
     { name = "boto3" },
     { name = "gguf" },
-    { name = "jinja2" },
     { name = "numpy" },
     { name = "pandas" },
     { name = "peft" },
@@ -692,10 +690,8 @@ dependencies = [
 
 [package.metadata]
 requires-dist = [
-    { name = "accelerate", specifier = ">=1.15.0" },
     { name = "boto3", specifier = ">=1.43.123" },
     { name = "gguf", specifier = ">=0.19.0" },
-    { name = "jinja2", specifier = ">=3.1.6" },
     { name = "numpy", specifier = ">=2.5.4" },
     { name = "pandas", specifier = ">=3.1.0" },
     { name = "peft", specifier = "==0.21.2" },
