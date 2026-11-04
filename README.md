@@ -1,12 +1,12 @@
 # Module-ECC pipeline
 
-This pipeline takes raw Minecraft chat logs and produces the fast-check classifier that the model host (ECC-Server)
-runs for Module-ECC on the game server, plus the measurements that decide whether it ships. Each step is one command. `uv run status` shows where
-you are.
+This pipeline takes raw Minecraft chat logs and produces the fast-check classifier that ECC-Server runs for
+Module-ECC on the game server, plus the measurements that decide whether it ships. Each step is one command.
+`uv run status` shows where you are.
 
 ```text
-raw logs -> ingest -> candidates -> label -> merge -> trainset -> train -> export -> eval -> review
-                                                                            redteam (slow check vs. Bedrock)
+raw logs -> ingest -> candidates -> label -> merge -> trainset -> train -> export -> eval -> bundle -> promote
+                                                                           review, redteam (slow check vs. Bedrock)
 ```
 
 ## Setup
@@ -42,14 +42,17 @@ Ctrl+C stops a step and keeps all finished work. Run the same command again to c
 | Path | Contents |
 | --- | --- |
 | `src/ecc/` | The steps. |
-| `docs/` | The design spec and the welfare page. |
-| `data/` | Private (gitignored, backed up to Telesphorepo): messages, labels, model outputs, and the files below. |
+| `docs/` | The design specs and the welfare page. |
+| `data/` | Private: gitignored, backed up whole to Telesphorepo. Everything the pipeline cannot rebuild. |
+| `data/raw/<source>/` | The chat logs of each `[ingest]` source. |
 | `data/policy.md` | The rulebook. Labeling and the slow check both read it. |
-| `data/labeling/LABELING.md` | Codex's labeling instructions. |
+| `data/labeling/` | Codex's labeling instructions and the term lists that choose which messages are labelled. |
 | `data/prompts/` | The slow check's system prompt (`slow-check.txt`, with the policy in place of `{policy}`) and the prompted baseline models' prompts. |
-| `data/cases/` | Synthetic, held-out, red-team, attack and real-chat conversations, with their expected roles. |
+| `data/cases/<set>/` | One folder per eval and red-team set: its case files (`.txt`) and expected roles (`.json`). `attacks/` builds its set in code. |
+| `data/synthetic/` | Written training conversations (`[trainset] extra`); `data/briefs/` holds the briefs they were written from. |
 | `data/decision.toml` | The deployed decision thresholds. |
-| `data/labeling/terms.toml` | The term lists that choose which messages are labelled. |
+| `data/local.toml` | This machine's paths and private settings. |
+| `<work>/` | `[paths] work`, outside the repository, never backed up: models, bundles, eval scores, the train and val tables, the review queue, logs, tools, and notes. |
 
 ## ingest
 
@@ -80,14 +83,14 @@ Takes about a minute for 2.2M messages.
 
 ## candidates
 
-Reads `messages.parquet`. Finds risk-term hits (`RISK` in `src/ecc/chat.py`; each term also matches with a plural s)
-and the rows listed in `data/audit/rows.jsonl` (one `{"row": n}` per line, such as high-scoring rows of the eval set
-`outside`), and merges each with 8 lines before and 4 after into conversation windows. `data/windows.jsonl` only grows:
-every hit outside all existing windows gets a new window, so new messages and new risk terms add windows without
-changing the labelled ones. A new window may share context lines with an existing one; merge keeps the existing
-label for those lines. New windows go into new Codex shards (`data/label/shards/*.txt`, 50 windows each, indexed in
-`shards.json`), and `uv run label` labels only those. Lines outside every window are ok without labeling. The step
-refuses to run when a window's line no longer matches its row in `messages.parquet`. Takes about a minute.
+Reads `messages.parquet`. Finds risk-term hits (`risk` in `data/labeling/terms.toml`) and the rows listed in
+`data/audit/rows.jsonl` (one `{"row": n}` per line, such as high-scoring rows of the eval set `outside`), and merges
+each with 8 lines before and 4 after into conversation windows. `data/windows.jsonl` only grows: every hit outside all
+existing windows gets a new window, so new messages and new risk terms add windows without changing the labelled ones. A
+new window may share context lines with an existing one; merge keeps the existing label for those lines. New windows go
+into new Codex shards (`data/label/shards/*.txt`, 50 windows each, indexed in `shards.json`), and `uv run label` labels
+only those. Lines outside every window are ok without labeling. The step refuses to run when a window's line no longer
+matches its row in `messages.parquet`. Takes about a minute.
 
 ## label
 
@@ -108,38 +111,39 @@ The full corpus takes a few hours.
 
 ## merge
 
-Reads the shard outputs, the regrade outputs and `data/corrections.jsonl`. When sources disagree, a correction beats
-the unsure regrade, which beats the regrade sets, which beat the first pass. Writes `data/labels.parquet` (row, label `ban`/`amb`/`ok`, rule, window)
-and `data/roles.jsonl`. Hand fixes in `corrections.jsonl` are kept every time the labels are rebuilt. Takes seconds.
+Reads the shard outputs, the regrade outputs and `data/corrections.jsonl`. When sources disagree, a correction beats the
+unsure regrade, which beats the regrade sets, which beat the first pass. Writes `data/labels.parquet` (row, label
+`ban`/`amb`/`ok`, rule, window) and `data/roles.jsonl`. Hand fixes in `corrections.jsonl` are kept every time the labels
+are rebuilt. Takes seconds.
 
 ## trainset
 
-Reads `messages.parquet` and `labels.parquet`. Writes `<work>/training/train.parquet` and `<work>/training/val.parquet`. Each example is a
-message with up to 29 earlier lines of its conversation, the most a classifier prompt holds. `amb` lines are
-dropped. A sample of out-of-window ok lines is added. Validation gets 5% of conversations. The case files in the
-`[trainset] extra` folders (written conversations in `data/synthetic/`) go to the training split only. The current Total Freedom logs and the eval case files never go into
-training. Takes seconds. Before written conversations go into an extra file, `uv run python -m ecc.leakage FILE`
-lists their lines that equal or nearly equal an eval-set line or a val text, and speakers who are real players
-(`--drop` removes the leaking lines).
+Reads `messages.parquet` and `labels.parquet`. Writes `<work>/training/train.parquet` and `<work>/training/val.parquet`.
+Each example is a message with up to 29 earlier lines of its conversation, the most a classifier prompt holds. `amb`
+lines are dropped. A sample of out-of-window ok lines is added. Validation gets 5% of conversations. The case files in
+the `[trainset] extra` folders (written conversations in `data/synthetic/`) go to the training split only. The current
+Total Freedom logs and the eval case files never go into training. Takes seconds. Before written conversations go into
+an extra file, `uv run python -m ecc.leakage FILE` lists their lines that equal or nearly equal an eval-set line or a
+val text, and speakers who are real players (`--drop` removes the leaking lines).
 
 ## train
 
 Needs a CUDA GPU. Fine-tunes a LoRA on a base model (a Hugging Face id from the local cache, or a model folder) as a
 single-token classifier. The prompt (`classifier_prompt` in `src/ecc/chat.py`) is a fixed instruction line, then one
-`speaker: text` line per message ending in a newline, the target message last; the answer is the one token after
-the target's newline, ` ban` or ` ok`. Speaker and text are NFC-normalized and a line break inside a message becomes
-a space. A conversation's prompt only grows by whole lines, so each prompt is a token prefix of the conversation's
-next one and llama-server decodes only the new line. The model host builds the prompts and calls llama-server; it
-keeps a window per conversation that holds 15 to 29 earlier lines plus the target: it grows until it would hold 30
-earlier lines and is then rebuilt from the last 15, or earlier when the prompt would pass 768 tokens (`WINDOW_*` in
-`chat.py`). 768 tokens is also the cap on every prompt in training and scoring. The model host must build exactly the
-same text.
-Training reads whole windows: each conversation is cut into the windows the model host builds, and one forward pass
-over a window gives every labelled line in it its loss at the token after its own newline. Causal attention lets that
-position see only the line's own prompt, so this is the same as training on each prompt alone, with 37% fewer
-tokens.
-`[train] model` picks the model (`1.7b`, `4b` or `qwen3.5-2b`, under `[train.models]`, with each model's token budget
-and gradient checkpointing); `--model` picks another. Everything goes to `<work>/models/<model>/`:
+`speaker: text` line per message ending in a newline, the target message last; the answer is the one token after the
+target's newline, ` ban` or ` ok`. Speaker and text are shown as a player sees them (`chat.clean`): NFKC, every
+character a player can type that ends a line becomes a space, right-to-left override runs are put in display order, and
+invisible format characters are dropped. Base64 in a message is decoded in place when it decodes to plain words
+(`chat.decode_base64`). A conversation's prompt only grows by whole lines, so each prompt is a token prefix of the
+conversation's next one and llama-server decodes only the new line. The model host builds the prompts and calls
+llama-server; it keeps a window per conversation that holds 15 to 29 earlier lines plus the target: it grows until it
+would hold 30 earlier lines and is then rebuilt from the last 15, or earlier when the prompt would pass 768 tokens
+(`WINDOW_*` in `chat.py`). 768 tokens is also the cap on every prompt in training and scoring. The model host must build
+exactly the same text. Training reads whole windows: each conversation is cut into the windows the model host builds,
+and one forward pass over a window gives every labelled line in it its loss at the token after its own newline. Causal
+attention lets that position see only the line's own prompt, so this is the same as training on each prompt alone, with
+37% fewer tokens. `[train] model` picks the model (`1.7b` or `4b`, under `[train.models]`, with each model's token
+budget and gradient checkpointing); `--model` picks another. Everything goes to `<work>/models/<model>/`:
 
 - `subset.parquet`, built once from `train.parquet`, `labels.parquet`, `messages.parquet` and the `[trainset] extra`
   files. The labelled lines are every ban row, every row from the extra files, 110,000 ok rows from inside labelled
@@ -155,20 +159,20 @@ and gradient checkpointing); `--model` picks another. Everything goes to `<work>
 
 Each of these records what it was made from: `subset.parquet.inputs.json` holds the fingerprints of `train.parquet`,
 `labels.parquet` and `messages.parquet`, a hash of the case-file texts it drops, the recipe, the base model and the
-prompt format; the checkpoints and `train_done.json` hold the subset's fingerprint and the training settings. When any of
-that changes, the subset is rebuilt and the run is trained again; `adapter/` and `train_done.json` are replaced when
-it finishes. If checkpoints exist from other settings, `train` stops and names the changed settings: delete `ckpt/`
-to train from the start, or restore the settings to continue.
+prompt format; the checkpoints and `train_done.json` hold the subset's fingerprint and the training settings. When any
+of that changes, the subset is rebuilt and the run is trained again; `adapter/` and `train_done.json` are replaced when
+it finishes. If checkpoints exist from other settings, `train` stops and names the changed settings: delete `ckpt/` to
+train from the start, or restore the settings to continue.
 
-On a 32 GB card the 1.7B model takes about 52 minutes and the 4B about 2 hours (estimates from the bounded and
-80-step runs: about 7,000 steps at 0.40 s and 0.94 s; `data/compare.md`).
+On a 32 GB card the 1.7B model takes about 52 minutes and the 4B about 2 hours (about 7,000 steps at 0.40 s and
+0.94 s).
 
 To compare base models and recipe changes, `uv run train --steps 2000 [--seed S] [--tag TAG] [--model NAME]` makes
 a bounded run: the same subset, the first steps of the epoch that hold 2,000 x 32 labelled lines, and warmup and
 cosine over those steps. The seed (default `[train] seed`) sets the batch order, the LoRA initialization and
 dropout. Each run has its own folder,
 `<work>/models/bounded/<model>[-<tag>]-s<seed>-n<steps>/`. Use a new `--tag` after changing the recipe to keep the
-earlier run: a folder whose recipe or inputs changed is trained again from the start. `data/compare.md` has the noise between seeds.
+earlier run: a folder whose recipe or inputs changed is trained again from the start.
 
 ## export
 
@@ -179,7 +183,8 @@ finished stage; anything else is made again, along with what was made from it:
 
 1. `merged/`: merges the adapter into the base model. The margins on 64 val prompts must stay within
    `merge_tolerance` of the margins recorded at the end of training.
-2. `gguf/`: the llama.cpp converter (`[paths] llama_src` in `local.toml`, a llama.cpp source checkout) writes bf16.
+2. `gguf/`: the llama.cpp converter (`[paths] llama_src` in `data/local.toml`, a llama.cpp source checkout) writes
+   bf16.
    `llama-imatrix` computes an importance matrix from 1,000 training-split prompts (`imatrix.txt`, never val); it
    reads the file as one token stream in fixed 512-token chunks that run across prompt boundaries. `llama-quantize`
    makes the `[export] deploy` type (Q5_K_M) with it and the token embedding, which is also the output head, at
@@ -187,9 +192,9 @@ finished stage; anything else is made again, along with what was made from it:
 3. `eval/parity-<deploy>.json`: llama-server's margins for the deployed GGUF, with the deployment's server settings,
    against PyTorch's on 300 val prompts.
 4. `data/classifier.toml`: `[models.classifier] gguf` (the deployed GGUF) and the tokenizer of the base model the run
-   was trained on. It overrides `ecc.toml`, and `local.toml` overrides it. `uv run eval` then scores that GGUF and adds
-   the Platt parameters it fits on the GGUF's own val margins. Its P(ban) is calibrated on val's class balance (about
-   5% ban), not on live chat, so it is a fixed scale for thresholds, which come from evaluation.
+   was trained on. It overrides `ecc.toml`, and `data/local.toml` overrides it. `uv run eval` then scores that GGUF and
+   adds the Platt parameters it fits on the GGUF's own val margins. Its P(ban) is calibrated on val's class balance
+   (about 5% ban), not on live chat, so it is a fixed scale for thresholds, which come from evaluation.
 
 Development scores on the GPU: `[eval] server` points at a CUDA build of the same llama.cpp release. llama.cpp's
 margins depend on the backend (CPU builds for different instruction sets differ by about 0.1-0.2 on average), so a
@@ -210,8 +215,9 @@ is in-sample. The step does not touch `data/classifier.toml`.
 
 ## eval
 
-`uv run eval` scores a model on every set: the case files in `[eval.sets]`, `val`, and `tf` (every message of the
-current Total Freedom logs, which are never used for training). The classifier sees each message with the history
+`uv run eval` scores a model on every set: the case-set folders in `[eval.sets]`, `attacks` (what a player controls
+in the classifier's input, built by `data/cases/attacks/`), `val`, and `tf` (every message of the current Total
+Freedom logs, which are never used for training). The classifier sees each message with the history
 its conversation's window would hold in the model host: val and tf messages replay their conversation from
 `messages.parquet`, case messages their case-file conversation. The classifier is scored by the llama.cpp library of
 the `[eval] server` build (`src/ecc/llama.py`, in its own process), one forward pass per conversation window: while a
@@ -250,16 +256,17 @@ full run takes about 10 minutes on the RTX 5090.
 ## review
 
 Reads a model's scores on labelled training rows (`uv run eval --model <model> --set train` makes them) and finds the
-labelled lines the model strongly disagrees with (confident learning). Only training rows are queued, so
-relabelling never moves val or tf toward the model. They go to `<work>/review/queue.txt`. To fix a label, write `ban`, `ok` or `amb`
+labelled lines the model strongly disagrees with (confident learning). Only training rows are queued, so relabelling
+never moves val or tf toward the model. They go to `<work>/review/queue.txt`. To fix a label, write `ban`, `ok` or `amb`
 after `fix:` and run `uv run review` again. The fix moves to `data/corrections.jsonl`. `uv run merge` applies it.
 
 ## redteam
 
-Runs the slow check as the spec deploys it on the red-team and regression conversations: Kimi K3 on Bedrock with
+Runs the slow check as ECC-Server runs it on the `[redteam.sets]` case-set folders: Kimi K3 on Bedrock with
 datamarked transcripts and code-verified quotes, roles and clearing, and the fine-tuned classifier
-(`[redteam] fast_model`, its case-set scores from `eval`) as the fast layer. A player triggers at their first message
-with P(ban) at or above `[redteam] trigger`; a conversation where nobody triggers gets no Kimi call. A triggered
+(`[redteam] fast_model`, its case-set scores from `eval`) as the fast layer. The thresholds are the deployed ones in
+`data/decision.toml` (`--trigger`, `--clearing` and `--corroboration` try others). A player triggers at their first
+message with P(ban) at or above the trigger; a conversation where nobody triggers gets no Kimi call. A triggered
 player is cleared only with no verified quote and every earlier message below `clearing`. A player who never
 triggered, in a conversation where someone did, is banned only with corroboration: a verified quote tagged starting,
 directed, pushing or grooming, and at least one of their quoted messages at or above `corroboration`. Every message
@@ -269,12 +276,12 @@ of the sets being run needs a current `eval` score. Writes
 
 ## bundle
 
-`uv run bundle` writes the classifier bundle the model host serves to
-`<work>/bundles/<run>-<GGUF SHA-256 prefix>-<content hash>/`: `model.gguf`, `bundle.json` (Platt parameters, prompt
-format and window bounds, the `[redteam]` trigger, clearing and corroboration thresholds, the slow check's system
-prompt, the pinned llama.cpp release and llama-server's deployment arguments) and `manifest.json` with each file's
-SHA-256. It needs the Platt parameters `eval` fits. It then uploads the folder to the private W&B project in
-`[wandb]` as a version of the bundle artifact, aliased with the bundle version (`--local` skips the upload).
+`uv run bundle` writes the classifier bundle the model host serves to `<work>/bundles/<run>-<GGUF SHA-256
+prefix>-<content hash>/`: `model.gguf`, `bundle.json` (Platt parameters, prompt format and window bounds, the trigger,
+clearing and corroboration thresholds from `data/decision.toml`, the slow check's system prompt, the pinned llama.cpp
+release and llama-server's deployment arguments) and `manifest.json` with each file's SHA-256. It needs the Platt
+parameters `eval` fits. It then uploads the folder to the private W&B project in `[wandb]` as a version of the bundle
+artifact, aliased with the bundle version (`--local` skips the upload).
 
 ## promote
 
@@ -284,14 +291,12 @@ check or at `ecc-server update`, verifies it and swaps it in. Promoting an earli
 
 ## backup
 
-`uv run backup` copies what the pipeline cannot rebuild to the private `ecc-data` raw repository on Telesphorepo
-(`telesphorepo.toml`): the raw chat logs of every `[ingest]` source, the Codex label files, corrections, windows,
-messages and labels, the case, attack and synthetic sets, the cached redteam answers, the policy, prompts, term lists
-and decision thresholds, `local.toml`, the audit checks and the git history from before the repository went public.
-Notes and `.env` are never included. The repository keeps one file per path and a publish replaces it, so each backup goes to its own
-`backups/<UTC time>/` folder, uploaded with `--if-new` so no backup is ever written over; `latest.txt` names the newest.
-Each backup holds gzipped tar bundles and `manifest.json` with each file's SHA-256, size and modification time. Run it
-after every labelling or merge step. `--dry-run` builds the bundles in `data/backup-out/` without publishing.
+`uv run backup` copies the whole `data/` folder to the private `ecc-data` raw repository on Telesphorepo
+(`telesphorepo.toml`): one gzipped tar per folder in it, one for the files directly in it, and `manifest.json` with
+each file's SHA-256, size and modification time. The work folder and `.env` are never included. The repository keeps
+one file per path and a publish replaces it, so each backup goes to its own `backups/<UTC time>/` folder, uploaded
+with `--if-new` so no backup is ever written over; `latest.txt` names the newest. Run it after every change to
+`data/`. `--dry-run` builds the archives in `<work>/backup-out/` without publishing.
 
 `uv run restore` brings the newest backup back (`--backup backups/<UTC time>` for another one). It needs a read token
 of `ecc-data` as `TELESPHOREPO_USER` and `TELESPHOREPO_READ_TOKEN` in `.env`. It checks every bundle and file
@@ -301,7 +306,9 @@ files get their recorded modification times, so every step that was current at t
 
 ## Deploying
 
-The model host (ECC-Server, a separate project) serves the bundle `promote` made production, beside `llama-server` on
-the game host's CPU. Module-ECC sends it each message; the host builds each conversation's growing prompt and sends it
-to llama-server with `cache_prompt`, so the server's prefix cache needs the bundle's llama-server settings (`-np 4 -c
-4096 --slot-prompt-similarity 0.5 --cache-ram 1024 --no-cache-idle-slots`), the settings `export`'s parity check runs.
+ECC-Server (github.com/plexusorg/ECC-Server) serves the bundle `promote` made production, beside `llama-server` on the
+game host's CPU, and makes every chat-safety decision: the trigger, the slow check on Bedrock and the verdicts.
+Module-ECC, the Plex module, sends it each message and carries out its mutes and bans. ECC-Server builds each
+conversation's growing prompt exactly as `chat.py` does and sends it to llama-server with `cache_prompt`, so the
+server's prefix cache needs the bundle's llama-server settings (`-np 4 -c 4096 --slot-prompt-similarity 0.5
+--cache-ram 1024 --no-cache-idle-slots`), the settings `export`'s parity check runs.
