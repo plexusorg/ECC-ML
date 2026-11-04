@@ -1,10 +1,9 @@
-# Private data: chat logs, labels, model outputs. Never commit.
+# Private: chat logs, labels, the policy, prompts and thresholds (AGENTS.md). Never commit.
 /data/
-# Credentials (.env.example lists them) and this machine's paths and private settings.
+# Credentials (.env.example lists them).
 /.env
-/local.toml
 
 .venv/
 __pycache__/
 *.pyc
-.idea/workspace.xml
+.idea/
