@@ -1,0 +1,10 @@
+# Private data: chat logs, labels, model outputs. Never commit.
+/data/
+# Credentials (.env.example lists them) and this machine's paths and private settings.
+/.env
+/local.toml
+
+.venv/
+__pycache__/
+*.pyc
+.idea/workspace.xml

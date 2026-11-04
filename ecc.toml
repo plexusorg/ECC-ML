@@ -1,0 +1,139 @@
+# Module-ECC pipeline settings. Every step reads this file; no step needs flags for the normal run.
+# data/ is the private folder (gitignored, backed up whole by `uv run backup`): chat logs, labels, case sets, the
+# policy and prompts, the decision thresholds and data/local.toml (this machine's paths and private settings; it
+# overrides anything here). What the pipeline rebuilds goes to the work folder, [paths] work in data/local.toml,
+# outside the repository: models, bundles, eval scores, the train and val tables, logs and tools. Credentials are in
+# .env beside this file (.env.example lists them). Paths below may use {data}, {repo} and any key under [paths], such
+# as {work}.
+data = "data"
+
+[ingest]
+# The folder that holds messages.parquet and state/ingest.json (`uv run ingest --folder` overrides it).
+folder = "{data}"
+# Sources, in the order new messages are appended. Every run reads every file again; messages are keyed by id, so a
+# file seen twice (a latest.log that rotated into a dated file) adds nothing. `path`: the source's folder of log files;
+# a new log file goes into it.
+# kind "paper": a Paper server's logs folder (YYYY-MM-DD-n.log.gz and latest.log). kind "discord": a folder of
+# DiscordChatExporter text exports whose names contain "flagged". `server`: the server the messages were said on;
+# Paper sources of one server are read as one log, and a discord source's messages are on "<server>/<Server field>".
+# `train`: whether the training set may use the source (the current Total Freedom logs are the real-chat test set).
+sources = [
+    { name = "tf", kind = "paper", path = "{data}/raw/tf", server = "tf", train = false },
+    { name = "creayun", kind = "discord", path = "{data}/raw/creayun", server = "creayun", train = true },
+    { name = "tf-old", kind = "paper", path = "{data}/raw/tf-old", server = "tf", train = true },
+]
+# Accounts seen only in minutes with at least this many messages (and 3 minutes around them) are raid bots.
+raid_messages_per_minute = 60
+
+[candidates]
+before = 8          # lines of context before a risk-term hit
+after = 4           # lines after
+max_window = 60     # longer windows are split, overlapping by `before` lines
+shard_size = 50     # windows per Codex shard
+overlap = 0.05      # share of windows labelled twice in the first batch, to measure agreement
+
+[label]
+model = "gpt-6.1-sol"
+effort = "medium"
+parallel = 8
+capacity_retries = 8    # "model is at capacity" answers are retried with backoff this many times
+
+[trainset]
+outside = 400000        # ok rows sampled from outside every candidate window
+val_percent = 5         # conversations (hashed) that go to validation
+# Folders of written conversations in case-file format (## <id> [<channel>], then label|speaker|text) that go to the
+# training split only; `train` keeps every labelled line of them, ok lines too.
+extra = ["{data}/synthetic"]
+
+[train]
+model = "4b"          # the [train.models.*] entry `train` and `export` use; its run folder is <work>/models/<model>
+# Labelled lines from train.parquet: every ban row plus these ok rows, trained in the model host's windows of their
+# conversations (the other lines of a window are context only).
+neg_window = 110000     # ok rows inside labelled windows (hard negatives: near sexual talk but ok)
+neg_outside = 70000     # ok rows outside every window (ordinary chat)
+dup_cap = 5             # a normalised target text is kept at most this many times per label (spam floods)
+batch = 32              # labelled lines per step, about: a step holds whole windows
+lr = 2e-4               # AdamW; warmup over 5% of the labelled lines (at most 100 steps' worth), then cosine to 10%
+rank = 16               # LoRA rank on every linear layer; alpha is twice the rank, dropout 0.05
+seed = 1
+save_every = 500        # steps between checkpoints and in-training val AUROC
+val_n = 2000            # val rows scored at each checkpoint
+# token_budget: padded tokens per micro-batch; a step's windows are split into micro-batches of at most this many.
+# Measured on the 32 GB card: 1.7B without checkpointing peaks at 23 GiB reserved at 5120 (6144 reached 27 GiB);
+# 4B without checkpointing peaks at 25.5 GiB at 2304 (three 768-token windows; four pass 28 GiB), 0.94 s per step;
+# with checkpointing it peaks at 20.4 GiB at 24576 and takes 1.31 s.
+[train.models."1.7b"]
+base = "Qwen/Qwen3-1.7B-Base"
+token_budget = 5120
+grad_ckpt = false
+[train.models."4b"]
+base = "Qwen/Qwen3-4B-Base"
+token_budget = 2304
+grad_ckpt = false
+
+[export]
+converter = "{llama_src}/convert_hf_to_gguf.py"    # llama.cpp source checkout ([paths] llama_src in local.toml)
+imatrix = "{llama}/llama-imatrix.exe"
+quantize = "{llama}/llama-quantize.exe"
+merge_tolerance = 0.5   # largest margin change the merge may cause on training's 64 check prompts
+imatrix_prompts = 1000  # training-split prompts the importance matrix is computed from
+parity_prompts = 300    # val prompts scored by llama-server and PyTorch
+# llama-quantize type of the GGUF written to [models.classifier], made with the importance matrix and a Q8_0 token
+# embedding. Q5_K_M, or Q4_K_M for less CPU per message at more error.
+deploy = "Q5_K_M"
+
+# Where `bundle` uploads classifier bundles (a private W&B project) and `promote` moves the production alias the
+# model host (ECC-Server) serves. The key is WANDB_API_KEY in .env.
+[wandb]
+entity = "telesphoreo-telesphoreo"
+project = "ecc"
+artifact = "classifier-bundle"
+
+# Fast-check models scored by `eval`. kind "classifier": the fine-tuned single-token model (raw prompt, /completion).
+# kind "chat": a prompted instruct model (prompt file with ### system / ### user sections).
+[models.baseline]
+kind = "chat"
+gguf = "{models}/Qwen3-4B-Instruct-2507-Q4_K_M.gguf"
+prompt = "{data}/prompts/fast-v11.txt"
+history = 8
+
+# `export` writes gguf, tokenizer and the Platt parameters (platt) to data/classifier.toml. Its history is the
+# streaming window in src/ecc/chat.py (WINDOW_MIN).
+[models.classifier]
+kind = "classifier"
+
+[eval]
+model = "classifier"
+server = "{llama}/llama-server.exe"
+threads = 6
+# Conversation windows per llama.cpp decode when eval scores the classifier, and export's parity llama-server slots;
+# 1,024 tokens each, as deployed. On the RTX 5090 8 to 32 score equally fast: the decode is GPU-bound.
+slots = 16
+port = 18700
+thresholds = [0.5, 0.8, 0.9, 0.95, 0.99]
+# Case sets scored per model: folders of case files (label|speaker|text) and their expected roles (.json). The real
+# Total Freedom log ("tf"), "val" and the attacks set (data/cases/attacks/, built in code) are built in.
+[eval.sets]
+cases = ["{data}/cases/regression", "{data}/cases/real"]
+redteam = ["{data}/cases/redteam"]
+heldout = ["{data}/cases/heldout"]
+injection = ["{data}/cases/injection"]
+
+[review]
+model = "classifier"
+size = 500              # queue length
+sample_windows = 2000   # labelled windows whose training rows `uv run eval --set train` scores for the queue
+
+[redteam]
+model = "us.moonshotai.kimi-k3"
+workers = 6
+# The fast check: the model whose `uv run eval` case-set scores trigger, clear and corroborate. Its P(ban) thresholds
+# (trigger, clearing, corroboration) are private, in data/decision.toml, and the bundle carries them to the host.
+fast_model = "classifier"
+# Red-team sets: case-set folders, each with its expected roles beside its case files.
+[redteam.sets.redteam]
+cases = ["{data}/cases/redteam"]
+samples = 2                 # independent Kimi runs: redteam, redteam-run2
+[redteam.sets.regression]
+cases = ["{data}/cases/regression"]
+samples = 1
