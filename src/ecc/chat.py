@@ -8,6 +8,8 @@ import tomllib
 import unicodedata
 from pathlib import Path
 
+from .core import read_jsonl
+
 
 def terms(cfg):
     """The private term lists in data/labeling/terms.toml, compiled case-insensitively: "risk" (a hit opens a labeling
@@ -26,12 +28,7 @@ def render_window(w):
 
 
 def load_windows(path):
-    windows = {}
-    with open(path, encoding="utf-8") as f:
-        for line in f:
-            w = json.loads(line)
-            windows[w["id"]] = w
-    return windows
+    return {w["id"]: w for w in read_jsonl(path)}
 
 
 def files_in(paths, suffix):

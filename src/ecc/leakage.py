@@ -18,6 +18,7 @@ import pyarrow.parquet as pq
 
 from .chat import load_cases
 from .core import Config
+from .train import case_files
 
 MIN_SHARED = 5
 NEAR = 0.6
@@ -35,8 +36,7 @@ def main():
     ap.add_argument("files", nargs="+")
     args = ap.parse_args()
     cfg = Config()
-    eval_lines = [(c["text"], "case") for c in
-                  load_cases([cfg.path(f) for s in cfg["eval"]["sets"].values() for f in s])]
+    eval_lines = [(c["text"], "case") for c in load_cases(case_files(cfg))]
     eval_lines += [(t, "val") for t in pq.read_table(cfg.work / "training" / "val.parquet", columns=["text"]).column("text")
                    .to_pylist()]
     exact = {}
