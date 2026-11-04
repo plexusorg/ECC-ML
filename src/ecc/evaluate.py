@@ -700,12 +700,17 @@ def write_classifier(cfg, gguf, tokenizer, platt=None):
              f", Platt a {platt[0]:.4f}, b {platt[1]:.4f}" if platt else ", no Platt yet (`uv run eval` fits it on val)")
 
 
+def model_sets(cfg, spec):
+    """Every set a [models.*] entry can be scored on; "train" and "outside" are scored only when named."""
+    if spec["kind"] == "classifier":
+        return [*cfg["eval"]["sets"], "attacks", "val", "tf", "train", "outside"]
+    return [*cfg["eval"]["sets"], "attacks", "tf"]   # val, train and outside prompts are built for the classifier
+
+
 def body(cfg, args):
     name = args.model or cfg["eval"]["model"]
     spec = cfg["models"][name]
-    every = [*cfg["eval"]["sets"], "attacks", "val", "tf", "train", "outside"]
-    if spec["kind"] != "classifier":
-        every = [*cfg["eval"]["sets"], "attacks", "tf"]   # val, train and outside prompts are built for the classifier
+    every = model_sets(cfg, spec)
     sets = args.set or [s for s in every if s not in ("train", "outside")]
     if "gguf" not in spec:
         raise SystemExit(f"[models.{name}] has no gguf; run `uv run export` first")

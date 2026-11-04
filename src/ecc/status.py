@@ -49,14 +49,13 @@ def export_row(cfg, name, out):
 
 
 def eval_row(cfg, name):
-    from .evaluate import set_scores
+    from .evaluate import model_sets, set_scores
     spec = cfg["models"][name]
     step = f"eval {name}"
     if "gguf" not in spec:
         return step, "[dim]not started[/]", "no gguf; `uv run export` writes it"
-    sets = [*cfg["eval"]["sets"], "tf"]
-    if spec["kind"] == "classifier":
-        sets += ["val"] + (["train"] if (cfg.work / "eval" / name / "train.jsonl").exists() else [])
+    sets = [s for s in model_sets(cfg, spec)
+            if s not in ("train", "outside") or (cfg.work / "eval" / name / f"{s}.jsonl").exists()]
     parts, current, complete = [], 0, 0
     for set_name in sets:
         scores = set_scores(cfg, name, set_name)
