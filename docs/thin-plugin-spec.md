@@ -48,8 +48,11 @@ every line players saw. That closes the old gap where the host's windows lacked 
   message, then schedules the kick for `kick_at` on the player's entity scheduler. A player is muted from the ban until
   the kick, whether or not they were muted before (a participant banned by corroboration).
 - `POST /actions/ack` with `{"id", "ok", "detail"}` once an action is carried out (for a ban: once the Plex entry is
-  written; the kick is not acknowledged). A failed action is retried by the plugin with backoff; the server records
-  every acknowledgement in the record.
+  written; the kick is not acknowledged). Only `ok: true` clears an action; after `ok: false` the server keeps it and
+  returns it from `/actions` again, so a failed ban survives a restart of either program. The plugin retries a failed
+  action with backoff. The server records every acknowledgement and answers 2xx to a repeated or unknown id.
+- At a ban's `kick_at` the server emits an `unmute` for that player, so the plugin's mute set never keeps a banned
+  player past their kick, whether they were online then or not.
 - `GET /muted` returns the current mute set (`[{"uuid", "name"}]`), including banned players until their kick. The
   plugin replaces its persisted copy with it at start and whenever it reconnects after an outage. While the server is
   unreachable, the persisted copy decides who is muted.
@@ -70,7 +73,8 @@ player's slow check (they can add evidence, never clear) and records them, and d
 
 `Scorer`, `Pending`, `SlowCheck`, `Evidence`, `Bedrock`, `RecordLog`, `DuplicateKey`, `Decision`, `Verdict`, the model
 host scoring client, and their config keys (`queue_size`, `record_retention_days`, `kick_delay_minutes`,
-`held_cap_minutes`). Config keeps the chat safety switch, `server` and `model_host`. The pending table migration is
+`held_cap_minutes`, and `server`: the server name in the records is ECC-Server config now). Config keeps the chat
+safety switch and `model_host`. The pending table migration is
 replaced by a mute-set table.
 
 ## Built in ECC-Server
