@@ -42,7 +42,7 @@ Ctrl+C stops a step and keeps all finished work. Run the same command again to c
 | Path | Contents |
 | --- | --- |
 | `src/ecc/` | The steps. |
-| `docs/` | The design specs and the welfare page. |
+| `docs/` | The system's design (`design.md`: the pipeline, ECC-Server, Module-ECC and their protocol) and the welfare page. |
 | `data/` | Private: gitignored, backed up whole to Telesphorepo. Everything the pipeline cannot rebuild. |
 | `data/raw/<source>/` | The chat logs of each `[ingest]` source. |
 | `data/policy.md` | The rulebook. Labeling and the slow check both read it. |
@@ -234,7 +234,7 @@ scores just those. `summary.md` is rebuilt from every set whose messages all hav
 set is listed with its unscored count): AUROC and PR-AUC, recall at val false-positive rates on
 all of val and on val rows whose text never appears in train, players caught by each window rule, and, on the real
 log, the players triggered per day, the known offenders caught, and the labelled offenders caught at the operating cut
-(the margin at val FPR 1%, where the fast check's trigger sits). The classifier's thresholds apply to its Platt
+(the margin at val FPR 1%). The classifier's thresholds apply to its Platt
 P(ban), as in the model host.
 
 `failures.md`, rebuilt with the summary, shows where the model fails:
@@ -308,7 +308,8 @@ files get their recorded modification times, so every step that was current at t
 
 ECC-Server (github.com/plexusorg/ECC-Server) serves the bundle `promote` made production, beside `llama-server` on the
 game host's CPU, and makes every chat-safety decision: the trigger, the slow check on Bedrock and the verdicts.
-Module-ECC, the Plex module, sends it each message and carries out its mutes and bans. ECC-Server builds each
-conversation's growing prompt exactly as `chat.py` does and sends it to llama-server with `cache_prompt`, so the
-server's prefix cache needs the bundle's llama-server settings (`-np 4 -c 4096 --slot-prompt-similarity 0.5
---cache-ram 1024 --no-cache-idle-slots`), the settings `export`'s parity check runs.
+Module-ECC, the Plex module, sends it each message and carries out its mutes and bans; `docs/design.md` describes the
+whole system and its protocol. ECC-Server builds each conversation's growing prompt exactly as `chat.py` does and
+sends it to llama-server with `cache_prompt`, so the server's prefix cache needs the bundle's llama-server settings
+(`-np 4 -c 4096 --slot-prompt-similarity 0.5 --cache-ram 1024 --no-cache-idle-slots`), the settings `export`'s
+parity check runs.

@@ -1,4 +1,4 @@
-"""uv run bundle: the classifier bundle the model host (ECC-Server, docs/spec.md section 3) serves, as a folder.
+"""uv run bundle: the classifier bundle the model host (ECC-Server, docs/design.md) serves, as a folder.
 
 <work>/bundles/<version>/ holds:
 - model.gguf, data/classifier.toml's GGUF;
@@ -33,7 +33,7 @@ from .redteam import evidence_system
 LLAMA_RELEASE = {"release": "b12059", "asset": "llama-b12059-bin-ubuntu-x64.tar.gz",
                  "url": "https://github.com/ggml-org/llama.cpp/releases/download/b12059/llama-b12059-bin-ubuntu-x64.tar.gz",
                  "sha256": "cfb45331bf4ab9af5834dedfed77ec10d531a83de9a2dc05a03d3e131c7cdb12"}
-# docs/spec.md section 3: 4 slots of 1,024 tokens, prompt-prefix caching
+# 4 slots of 1,024 tokens, prompt-prefix caching
 SERVER_ARGS = ["-np", "4", "-c", "4096", "--slot-prompt-similarity", "0.5", "--cache-ram", "1024",
                "--no-cache-idle-slots"]
 

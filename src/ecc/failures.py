@@ -11,8 +11,7 @@ labels.parquet's rule.
 - tf: players are offenders when labels.parquet labels one of their rows ban (rows outside every window count as ok);
   at the operating cut, the offenders it misses and the other players it triggers.
 
-The operating cut is the margin at val FPR 1%, where the fast check's trigger sits (docs/spec.md). Without current
-val scores, the lists that need it are left out.
+The operating cut is the margin at val FPR 1%. Without current val scores, the lists that need it are left out.
 """
 from collections import defaultdict
 

@@ -20,7 +20,7 @@ public (github.com/plexusorg/ECC-ML); its data, policy and model are private.
   what is in it.
 - Never work in a session scratchpad or temp folder; it has been wiped mid-task more than once.
 - Anything that would help someone evade or reproduce the filter stays in `data/`: the policy, prompts, thresholds,
-  term lists, case, attack and synthetic sets, and measured model gaps. Code and the design specs are public.
+  term lists, case, attack and synthetic sets, and measured model gaps. Code and the design (`docs/design.md`) are public.
 
 ## The labelled data
 

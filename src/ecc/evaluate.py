@@ -46,9 +46,9 @@ from .core import (MESSAGES, JsonlAppender, changed_keys, fingerprint, is_curren
 from .llama import TOP_LOGPROBS
 
 FPRS = (0.001, 0.005, 0.01)
-# llama-server settings per model kind. A classifier gets the model host's deployment settings (docs/spec.md,
-# section 3) except the slot count, [eval] slots slots of the deployment's 1,024 tokens each. Every layer goes to the
-# GPU when the configured build has one (a CPU build ignores -ngl).
+# llama-server settings per model kind. A classifier gets the model host's deployment settings (bundle.SERVER_ARGS)
+# except the slot count, [eval] slots slots of the deployment's 1,024 tokens each. Every layer goes to the GPU when the
+# configured build has one (a CPU build ignores -ngl).
 SLOT_TOKENS = 1024
 # llama.cpp's physical batch when eval scores classifier windows (on the RTX 5090, 512 is 13% slower, 4096 no faster)
 WINDOW_UBATCH = 2048

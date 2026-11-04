@@ -1,4 +1,4 @@
-"""uv run redteam [--set NAME]: the slow check as docs/spec.md deploys it (Kimi K3 on Bedrock, verified by code, with
+"""uv run redteam [--set NAME]: the slow check as ECC-Server runs it (Kimi K3 on Bedrock, verified by code, with
 the fine-tuned fast-check classifier) against the red-team and regression sets.
 
 Kimi reports evidence; code decides each player's outcome. Every Kimi call is cached in data/redteam/<tag>.calls.jsonl,
