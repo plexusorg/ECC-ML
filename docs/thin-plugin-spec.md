@@ -58,6 +58,14 @@ every line players saw. That closes the old gap where the host's windows lacked 
   unreachable, the persisted copy decides who is muted.
 - `GET /status`: model bundle, W&B, Bedrock, message backlog, pending players, unacknowledged actions.
 
+Every action carries `why` for staff, and the plugin shows each one in the console and to online players with
+`plex.ecc.alerts` (owner: staff see every decision as it happens). `mute`: `{"channel", "text"}`, the triggering
+line. `unmute`: `{"cause"}`, one of `not_involved`, `held_past_cap`, `kicked`. `ban`: `{"cause"}`, `kimi` or
+`corroborated`, beside `role` and `kick_at`. A `notice` action (`{"id", "type": "notice", "uuid", "name", "why":
+{"kind": "held"}}`) reports a "not sure yet" verdict; the plugin shows it and acknowledges it and changes nothing
+else. Alerts never show scores or thresholds. ECC-Server's journal logs every trigger, verdict and action with player
+names and channels, never chat text.
+
 A muted player's messages are still sent with `shadowed: true`: the server keeps them as later evidence for that
 player's slow check (they can add evidence, never clear) and records them, and does not score them.
 

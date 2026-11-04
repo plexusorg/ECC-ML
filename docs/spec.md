@@ -22,7 +22,6 @@ happened before without any action (solicitation, explicit image spam, sexual ha
 
 - Slurs, insults, hate speech, violence. Out of scope; placement in Plex or elsewhere is decided later.
 - Moderating Discord or any channel outside the game server.
-- Staff alerts. The outcome is a permanent ban or no ban.
 - Moderating staff. Staff bypass the filter by permission.
 
 ## Anti-goals (failure even if it "works")
