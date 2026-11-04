@@ -48,8 +48,7 @@ from .chat import (CLASSIFIER_HEADER, PROMPT_FORMAT, WINDOW_TOKENS, fitted_promp
                    window_sizes)
 from .classifier import (answer_ids, base_model, device, encode, hidden_at, pad_batch, token_count,
                          torch_margins)
-from .core import (changed_keys, fingerprint, is_current, log, progress, record_inputs, run, save_state,
-                   write_parquet, write_text)
+from .core import changed_keys, fingerprint, is_current, log, progress, record_inputs, run, write_parquet, write_text
 from .evaluate import items_of
 from .trainset import extra_cases, extra_files
 
@@ -467,9 +466,6 @@ def body(cfg, args):
         "peak_reserved_gib": peak, "check_prompts": val_prompts[:64], "check_margins": check}, indent=1))
     log.info("%s trained: %s steps in %.1f min; peak reserved %.1f GiB; adapter in %s", out.name, f"{total:,}",
              minutes, peak, out / "adapter")
-    if not steps:
-        save_state(cfg, f"train-{name}", [cfg.work / "training" / "train.parquet", cfg.data / "labels.parquet"], steps=total,
-                   examples=sum(counts))
 
 
 def main():

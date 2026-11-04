@@ -56,11 +56,6 @@ class Config:
         text = str(value).format(data=self.data, repo=REPO, **self.paths)
         return self._abs(text, REPO)
 
-    def local_path(self, key):
-        if key not in self.paths:
-            raise SystemExit(f"[paths] {key} is not set in {self.data / 'local.toml'}")
-        return Path(self.paths[key])
-
     def load_env(self):
         """Credentials from .env in the repository (.env.example lists them) into the environment. Values are never
         logged."""

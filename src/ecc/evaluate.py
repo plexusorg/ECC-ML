@@ -512,7 +512,7 @@ def pr_auc(scored):
 
 def message_stats(rows, platt=None, cut=None):
     """Per-message ban AUROC and PR-AUC; with cut (the margin at val FPR 1%), the bans and others at or above it."""
-    labelled = [r for r in rows if r["label"] in ("ban", "ok", "mute")]
+    labelled = [r for r in rows if r["label"] in ("ban", "ok")]
     scored = [(score(r, platt), r["label"] == "ban") for r in labelled]
     pos = [s for s, y in scored if y]
     neg = [s for s, y in scored if not y]

@@ -131,7 +131,7 @@ def case_set(rep, set_name, rows):
     if rep.cut is None:
         return
     bans = sorted((r for r in rows if r["label"] == "ban" and r["margin"] < rep.cut), key=lambda r: r["margin"])
-    flagged = sorted((r for r in rows if r["label"] in ("ok", "mute") and r["margin"] >= rep.cut),
+    flagged = sorted((r for r in rows if r["label"] == "ok" and r["margin"] >= rep.cut),
                      key=lambda r: -r["margin"])
     rep.text("", f"At the operating cut, P {rep.p(rep.cut):.3f}: {plural(len(bans), 'ban')} missed and "
                  f"{plural(len(flagged), 'other message')} flagged.")

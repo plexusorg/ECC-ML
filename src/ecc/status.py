@@ -141,7 +141,3 @@ def main():
     for r in rows:
         table.add_row(*r)
     console.print(table)
-    archive = data / "archive"
-    if archive.exists():
-        console.print(f"[dim]spike results kept for reference: {', '.join(sorted(p.name for p in archive.iterdir()))}"
-                      f" in {archive}[/]")
