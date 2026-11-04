@@ -46,8 +46,7 @@ from .evaluate import (FPRS, Server, case_summary, classifier_margin, current_sc
                        start_scores, tf_summary, write_classifier)
 from .train import run_args, run_dir
 
-# Scores (eval/torch-<prompt format>/) and Platt fit of the classifier's prompt format; write_table lists every format
-# a bounded run has scores for.
+# A bounded run's PyTorch scores (eval/<EVAL>/) and their Platt fit.
 EVAL = "torch-stream"
 PLATT = "platt-stream.json"
 
@@ -333,26 +332,23 @@ def write_table(cfg):
     counting those offenders. The threshold is picked on tf itself, so the count is in-sample."""
     root = cfg.work / "models" / "bounded"
     sets = list(cfg["eval"]["sets"])
-    head = ["run", "prompt", "steps", "train min", "peak GiB", "val AUROC", "PR-AUC",
+    head = ["run", "steps", "train min", "peak GiB", "val AUROC", "PR-AUC",
             *[f"recall@{f:.1%}" for f in FPRS], "val AUROC, novel text", *[f"{s} AUROC, bans at 1%" for s in sets],
             "tf other players at all known (in-sample)"]
     rows = []
-    for path in sorted(root.glob("*/eval/torch-*/metrics.json")):
+    for path in sorted(root.glob(f"*/eval/{EVAL}/metrics.json")):
         run_folder = path.parents[2]
         if not (run_folder / "train_done.json").exists():
             continue
-        fmt = path.parent.name.removeprefix("torch-")
         d = json.loads((run_folder / "train_done.json").read_text(encoding="utf-8"))
         m = json.loads(path.read_text(encoding="utf-8"))
-        platt_path = run_folder / f"platt-{fmt}.json"
-        p = json.loads(platt_path.read_text(encoding="utf-8")) if platt_path.exists() else None
-        kt = known_threshold(cfg, read_jsonl(path.parent / "tf.jsonl"), (p["a"], p["b"]) if p else None)
-        novel = m.get("val_novel")
-        rows.append([run_folder.name, fmt, f"{d['steps']:,}",
+        p = json.loads((run_folder / PLATT).read_text(encoding="utf-8"))
+        kt = known_threshold(cfg, read_jsonl(path.parent / "tf.jsonl"), (p["a"], p["b"]))
+        rows.append([run_folder.name, f"{d['steps']:,}",
                      f"{d['train_minutes']:.1f}", f"{d['peak_reserved_gib']:.1f}",
                      f"{m['val']['auroc']:.4f}", f"{m['val']['pr_auc']:.3f}",
                      *[f"{m['val'][f'recall@fpr{f}']:.3f}" for f in FPRS],
-                     f"{novel['auroc']:.4f}" if novel else "-",
+                     f"{m['val_novel']['auroc']:.4f}",
                      *[f"{m[s]['auroc']:.3f}, {m[s]['caught']}/{m[s]['ban']}" for s in sets],
                      f"{kt['players'] - kt['known']} ({kt['known']} known)" if kt else "-"])
     write_text(root / "table.md", "\n".join("| " + " | ".join(r) + " |"
@@ -378,9 +374,7 @@ def body(cfg, args):
         torch_eval(cfg, out, load, model_inputs(out, steps))
         write_table(cfg)
         return
-    base = json.loads(done_path.read_text(encoding="utf-8")).get("settings", {}).get("base")
-    if base is None:
-        raise SystemExit(f"{done_path} has no training settings; run `uv run train` first")
+    base = json.loads(done_path.read_text(encoding="utf-8"))["settings"]["base"]
     stage = outputs(cfg, out)
     made_from = stage_inputs(cfg, out, "merge")
     if is_current(stage["merge"], made_from):

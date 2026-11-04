@@ -116,9 +116,8 @@ def run_state(cfg, name, seed, steps, out):
     found = checkpoints(out)
     ckpt_changed = None
     if found:
-        was = checkpoint_state(found[-1]).get("settings") or {}
-        # a checkpoint never matches a subset that is about to be rebuilt, even one written before subsets were recorded
-        ckpt_changed = sorted(k for k in settings if was.get(k) != settings[k] or (k == "subset" and not subset_ok))
+        was = checkpoint_state(found[-1])["settings"]
+        ckpt_changed = sorted(k for k in settings if was.get(k) != settings[k])
     return subset_from, subset_ok, settings, done, ckpt_changed
 
 

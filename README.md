@@ -206,9 +206,9 @@ build of llama.cpp on 16 threads of a Ryzen 9 9950X3D); quantizing takes seconds
 
 For a bounded run, `uv run export` with the run's train flags scores the adapter on the base model with PyTorch,
 without merging, on val, the case sets and the real log, summarized as `eval` does (val also on its rows whose text
-never appears in train), with a Platt fit on val (`platt-stream.json`). It writes `eval/torch-stream/` and
-`metrics.json` in the run folder and rebuilds
-`<work>/models/bounded/table.md`, one row per bounded run and prompt format it has scores for. The table's tf column is
+never appears in train), with a Platt fit on val (`platt-stream.json`). It writes the scores, `summary.md` and
+`metrics.json` to `eval/torch-stream/` in the run folder and rebuilds
+`<work>/models/bounded/table.md`, one row per bounded run. The table's tf column is
 recomputed from each run's tf scores with the current `known_offenders`: the players other than those offenders who
 trigger at the highest threshold that still triggers all of them. That threshold is picked on tf itself, so the count
 is in-sample. The step does not touch `data/classifier.toml`.
