@@ -79,10 +79,11 @@ raw logs -> ingest -> candidates -> label -> merge -> trainset -> train -> expor
   of a prompt. The prompt is a fixed instruction line, then one `speaker: text` line per message, the target last.
   Text is shown as a player sees it (`chat.clean`: NFKC, every character that can end a line becomes a space,
   right-to-left runs in display order, invisible format characters dropped), and base64 that decodes to plain words is
-  decoded in place. A conversation's window holds 15 to 29 earlier lines plus the target and at most 768 tokens; it
-  grows one line at a time and is rebuilt from its last 15 lines when it would pass either bound, so each prompt is a
-  token prefix of the next and llama-server decodes only the new line. The margin is log P(` ban`) - log P(` ok`) of
-  the exact answer tokens; Platt scaling fitted on validation maps it to P(ban), a fixed scale for the thresholds
+  decoded in place. A conversation's window holds 15 to 29 earlier lines plus the target (fewer at its start, or
+  when long lines would pass 768 tokens); it grows one line at a time and is rebuilt from its last 15 lines when it
+  would hold 30 earlier lines or pass 768 tokens, dropping the oldest of those while it would still pass. Between
+  rebuilds each prompt is a token prefix of the next, so llama-server decodes only the new line. The margin is
+  log P(` ban`) - log P(` ok`) of the exact answer tokens; Platt scaling fitted on validation maps it to P(ban), a fixed scale for the thresholds
   rather than a live-chat probability.
 - **Export and parity.** The merged model becomes a Q5_K_M GGUF, made with an importance matrix from training prompts
   and a Q8_0 token embedding (which is also the output head). Its llama-server margins, with the deployment's server
@@ -111,8 +112,9 @@ commands.
 **Bundles.** With a W&B key, the host checks which artifact version carries `production` every `check_interval` and
 at `ecc-server update`. A new bundle is downloaded, checked against W&B's sizes and MD5s and the manifest's SHA-256s,
 and swapped in without a gap in scoring: a second llama-server starts on the new GGUF, passes its health check, takes
-over scoring and the decision parameters together, and the old one stops. A bundle that fails any check is discarded
-and the current one keeps serving. The host keeps the previous bundle for `ecc-server rollback`. Without W&B it serves
+over scoring and the decision parameters together, and the old one stops. The current bundle keeps serving whatever
+fails: a bundle that fails a file check or whose llama-server fails its health check is discarded, and a failed
+download of its llama.cpp release is tried again at the next check. The host keeps the previous bundle for `ecc-server rollback`. Without W&B it serves
 the bundle on disk; `ecc-server use` installs a bundle folder by hand. Before any bundle is installed it reports not
 ready and scores nothing. It runs the llama.cpp release the bundle names, downloaded and checked against the
 bundle's SHA-256, as its child process; the GGUF never loads in Go.
@@ -124,15 +126,16 @@ bundle's SHA-256, as its child process; the GGUF never loads in Go.
   evidence, never clear.
 - A `bypass` message (staff) enters its conversation's window and the transcripts and is recorded unscored. Staff
   are never judged.
-- Every other message passes the duplicate rule: a player's exact repeat within 60 seconds reuses that copy's
-  verdict, and when three or more players send the same normalized text within 60 seconds, later copies reuse the
-  first copy's verdict. A reused copy still enters its window. The rest wait in a bounded queue per player (the oldest
-  is dropped from scoring when it is full, and still enters the window); players are served in turn, and each
-  conversation's lines reach its window in the order they were said. While no bundle is served or llama-server
-  fails, scoring pauses and the queues wait.
+- Every other message passes the duplicate rule: when a player's line in a conversation repeats their previous line
+  there exactly, within 60 seconds of the last copy, it reuses the first copy's verdict; when three or more players
+  send the same normalized text within 60 seconds, later copies reuse the first copy's verdict. A reused copy still
+  enters its window. The rest wait in a bounded queue per player (the oldest is dropped from scoring when it is full,
+  and still enters the window); players are served in turn, and each conversation's lines reach its window in the
+  order they were said. While no bundle is served or llama-server fails, scoring pauses and the queues wait; each
+  conversation then holds up to 64 waiting unscored lines, and past that its oldest never enters the window.
 
-So a conversation's window holds every line other players saw. A message whose P(ban) is at or above the bundle's
-trigger threshold triggers its speaker.
+So, outside a long scoring pause, a conversation's window holds every line other players saw. A message whose P(ban)
+is at or above the bundle's trigger threshold triggers its speaker.
 
 **Trigger.** The player is muted (a `mute` action) and becomes pending. The pending state, written atomically to the
 host's data folder on every change, holds the conversation up to the trigger and the player's lines after it, so a
@@ -149,7 +152,8 @@ decides, whatever Kimi says:
 - An age counts only when the player stated it in their own line before the trigger (a short "yea" confirming a
   question that holds the number counts), and no other such age is 18 or more.
 - A triggered player with a kept quote is an offender, unless they are a minor whose quotes are all responding or
-  self and who is not the first violator in any view: then they are at risk.
+  self and who is the first violator neither in the whole transcript nor in the cut at their own trigger: then they
+  are at risk.
 - A triggered player is cleared only when Kimi gives no kept quote and the classifier scores every message of theirs
   before the trigger below the clearing threshold; otherwise they are held (not sure yet). Later lines can add
   evidence, never clear.
@@ -160,17 +164,17 @@ decides, whatever Kimi says:
   backoff until Bedrock answers. The mute never lifts on a failure.
 
 The thresholds are those of the bundle that scored the trigger. The code is the port of the pipeline's
-`src/ecc/redteam.py`, checked against `redteam`'s cached Kimi answers with no mismatch.
+`src/ecc/redteam.py`.
 
 **Record and journal.** Every message with its score and bundle version, every trigger, Kimi call, verdict, action and
 acknowledgement is one JSON line in a daily file in the host's data folder, compressed with zstd after midnight UTC
-and deleted after the retention period. The systemd journal logs each trigger, verdict and action with player names
-and channels, never player text, prompts or model answers.
+and deleted after the retention period. ECC-Server's journal lines give each trigger, verdict and action with player
+names and channels, never player text, prompts or model answers.
 
 ## Module-ECC
 
-The Plex module that also holds NUSH raid protection (raid detection, quarantine, WorldEdit limits), which is always
-on. Chat safety has one switch, `chat_safety.enabled`, and two settings, `model_host` (ECC-Server's address) and
+The Plex module that also holds NUSH raid protection: raid detection always runs, and quarantine and the WorldEdit
+limits apply after `/nush on` or a detected raid. Chat safety has one switch, `chat_safety.enabled`, and two settings, `model_host` (ECC-Server's address) and
 `token`. While the switch is off, none of chat safety's parts exist and its settings are not read. With the switch on,
 each invalid setting, an empty token included, is logged and chat safety stays off.
 
@@ -180,8 +184,8 @@ channel, such as guild chat, through Plex's chat channel event. Each message car
 channel, the conversation, the other player for private messages and mail, `shadowed` when it reached only its author
 (muted, or NUSH quarantine) and `bypass` when the author has `plex.ecc.chat.bypass`. `/me`, private messages and
 mail are EssentialsX's and are captured when EssentialsX is enabled. A muted player sees their own
-public chat, `/me`, private messages and signs as if sent; nobody else does, their mail is not delivered, their
-nickname, book and item name changes do not happen, and vanilla messaging commands are refused.
+public chat, `/me`, private messages and signs as if sent; nobody else does, their mail is not delivered, their new
+nicknames (`/nick off` still works), books and item names do not happen, and vanilla messaging commands are refused.
 
 **Forwarding.** Capture only appends to an outbox, so chat never waits. One sender thread posts the messages in
 capture order; while ECC-Server is unreachable it keeps up to 500 per player (the oldest dropped, counted in the log)
@@ -202,8 +206,8 @@ their next login shows; an offline player is kept out by the entry. `notice` cha
 **Staff.** Each action carried out is shown once, in the console and to online players with `plex.ecc.alerts` who have
 not turned alerts off (`/ecc alerts`, until they leave): the mute's channel and triggering line, the unmute's cause,
 the ban's role, cause and kick time, and the notice. Alerts never show scores or thresholds. `/ecc status`
-(`plex.ecc.status`) shows the link to ECC-Server, the buffered messages, the unacknowledged actions, the mute set's
-size and ECC-Server's own status.
+(`plex.ecc.status`) shows the link to ECC-Server, the mute set's size, any buffered messages and unacknowledged
+actions, and ECC-Server's own status.
 
 ## Protocol
 
