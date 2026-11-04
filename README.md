@@ -32,9 +32,9 @@ raw logs -> ingest -> candidates -> label -> merge -> trainset -> train -> expor
    `promote`, the Bedrock key for `redteam`, the Telesphorepo read token for `restore`.
 4. For `label`, install the Codex CLI and log in (`codex`).
 
-Every setting lives in `ecc.toml`. `export` writes the classifier's GGUF and Platt parameters to
-`data/classifier.toml`, the decision thresholds are in `data/decision.toml`, and `data/local.toml` overrides all of
-them. Each run writes a full log to `<work>/logs/`.
+Every setting lives in `ecc.toml`. `export` writes the classifier's GGUF and tokenizer to `data/classifier.toml` and
+`eval` adds its Platt parameters, the decision thresholds are in `data/decision.toml`, and `data/local.toml` overrides
+all of them. Each run writes a full log to `<work>/logs/`.
 Ctrl+C stops a step and keeps all finished work. Run the same command again to continue from that point.
 
 ## Repository layout

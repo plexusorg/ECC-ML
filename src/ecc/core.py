@@ -74,7 +74,7 @@ def _merge(base, over):
 # ---------------------------------------------------------------- running a step
 
 def run(name, body, parser=None):
-    """Entry point wrapper: parse flags, log to the console and to <data>/logs, stop cleanly on Ctrl+C."""
+    """Entry point wrapper: parse flags, log to the console and to <work>/logs, stop cleanly on Ctrl+C."""
     args = parser.parse_args() if parser else None
     cfg = Config()
     logs = cfg.work / "logs"

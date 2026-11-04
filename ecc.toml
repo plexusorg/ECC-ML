@@ -97,8 +97,8 @@ gguf = "{models}/Qwen3-4B-Instruct-2507-Q4_K_M.gguf"
 prompt = "{data}/prompts/fast-v11.txt"
 history = 8
 
-# `export` writes gguf, tokenizer and the Platt parameters (platt) to data/classifier.toml. Its history is the
-# streaming window in src/ecc/chat.py (WINDOW_MIN).
+# `export` writes gguf and tokenizer to data/classifier.toml, and `eval` adds the Platt parameters (platt). Its
+# history is the streaming window in src/ecc/chat.py (WINDOW_MIN).
 [models.classifier]
 kind = "classifier"
 

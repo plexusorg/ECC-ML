@@ -5,7 +5,7 @@
 - bundle.json: the version, the Platt parameters, the prompt header and window bounds (chat.PROMPT_FORMAT; the host
   builds lines exactly as chat.clean and chat.prompt_line do), the decision parameters ([redteam] trigger, clearing and
   corroboration with the single-message rule), the slow check's system prompt with the policy (redteam.evidence_system;
-  the plugin is open source, so the policy reaches it only through the bundle), the llama.cpp release the host runs,
+  ECC-Server's code is public, so the policy reaches it only through the bundle), the llama.cpp release the host runs,
   and llama-server's deployment arguments (the host adds -t from its own config);
 - manifest.json: each file's SHA-256 and size.
 
