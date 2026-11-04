@@ -27,10 +27,11 @@ class Config:
 
     data is the private folder: everything the pipeline cannot rebuild, all of it backed up. work ([paths] work in
     local.toml, outside the repository) holds what the pipeline rebuilds: models, bundles, eval scores, the train and
-    val tables, the review queue, logs and tools. Nothing in work is backed up."""
+    val tables, the review queue, logs and tools. Nothing in work is backed up. The environment variables ECC_CONFIG
+    and ECC_DATA name another config file and data folder, to run the steps against a copy."""
 
-    def __init__(self, path=None):
-        path = Path(path or os.environ.get("ECC_CONFIG") or REPO / "ecc.toml")
+    def __init__(self):
+        path = Path(os.environ.get("ECC_CONFIG") or REPO / "ecc.toml")
         self.file = path
         self.raw = tomllib.loads(path.read_text(encoding="utf-8"))
         self.data = self._abs(os.environ.get("ECC_DATA") or self.raw["data"], path.parent)
