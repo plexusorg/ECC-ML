@@ -20,7 +20,10 @@ public (github.com/plexusorg/ECC-ML); its data, policy and model are private.
   what is in it.
 - Never work in a session scratchpad or temp folder; it has been wiped mid-task more than once.
 - Anything that would help someone evade or reproduce the filter stays in `data/`: the policy, prompts, thresholds,
-  term lists, case, attack and synthetic sets, and measured model gaps. Code and the design (`docs/design.md`) are public.
+  term lists, case, attack and synthetic sets, and measured model gaps. Code and the README are public.
+- Specs and working documents are not kept in the repository. Plans, progress and open decisions go in the handoff
+  (`notes/HANDOFF.md` in the work folder); what the system does is documented by the README and the code. `docs/` is
+  gitignored and holds only the public web pages (the welfare and safety pages).
 
 ## The labelled data
 

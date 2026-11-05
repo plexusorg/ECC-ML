@@ -42,7 +42,6 @@ Ctrl+C stops a step and keeps all finished work. Run the same command again to c
 | Path | Contents |
 | --- | --- |
 | `src/ecc/` | The steps. |
-| `docs/` | The system's design (`design.md`: the pipeline, ECC-Server, Module-ECC and their protocol) and the welfare page. |
 | `data/` | Private: gitignored, backed up whole to Telesphorepo. Everything the pipeline cannot rebuild. |
 | `data/raw/<source>/` | The chat logs of each `[ingest]` source. |
 | `data/policy.md` | The rulebook. Labeling and the slow check both read it. |
@@ -308,8 +307,8 @@ files get their recorded modification times, so every step that was current at t
 
 ECC-Server (github.com/plexusorg/ECC-Server) serves the bundle `promote` made production, beside `llama-server` on the
 game host's CPU, and makes every chat-safety decision: the trigger, the slow check on Bedrock and the verdicts.
-Module-ECC, the Plex module, sends it each message and carries out its mutes and bans; `docs/design.md` describes the
-whole system and its protocol. ECC-Server builds each conversation's growing prompt exactly as `chat.py` does and
+Module-ECC, the Plex module, sends it each message and carries out its mutes and bans; ECC-Server's README documents
+the protocol between them. ECC-Server builds each conversation's growing prompt exactly as `chat.py` does and
 sends it to llama-server with `cache_prompt`, so the server's prefix cache needs the bundle's llama-server settings
 (`-np 4 -c 4096 --slot-prompt-similarity 0.5 --cache-ram 1024 --no-cache-idle-slots`), the settings `export`'s
 parity check runs.

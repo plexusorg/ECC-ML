@@ -2,6 +2,8 @@
 /data/
 # Credentials (.env.example lists them).
 /.env
+# The public web pages (welfare, safety), published on the website, not in this repository.
+/docs/
 
 .venv/
 __pycache__/

@@ -1,4 +1,4 @@
-"""uv run bundle: the classifier bundle the model host (ECC-Server, docs/design.md) serves, as a folder.
+"""uv run bundle: the classifier bundle the model host (ECC-Server) serves, as a folder.
 
 <work>/bundles/<version>/ holds:
 - model.gguf, data/classifier.toml's GGUF;
