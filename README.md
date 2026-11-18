@@ -301,9 +301,7 @@ teacher folds (`c-<N>-fold<K>`). GPU, about 2 minutes an epoch.
 - **The teacher.** Each line's eight logits from the fold model of `<run>` that did not train on its run
   (`teacher.parquet` of each fold). The step refuses a fold trained on other inputs, labels, lines or length than
   `<run>`, a fold with different settings or coverage, a fold whose scored lines share a run with `trained-runs.json`,
-  and a cascade training line scored by no fold or by
-  two. `--teacher h` takes H instead (the models in `[train.sh] h`, at the length they were trained at, bf16, their mean;
-  cached in `<[train] out>/teacher-h.parquet`) into `sh-h/`, to check the folds' SH against an H-taught one.
+  and a cascade training line scored by no fold or by two.
 - **The recipe** (`[train.sh]`): the soft binary cross-entropy of SH's logits against the teacher's at `temperature`
   (times its square) on all eight outputs, plus the hard one on the labels, divided by the number of terms; batches of
   chunks of consecutive lines of one log file; AdamW with three learning rates (e5-small, the new layers, the head),

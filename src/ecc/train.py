@@ -1,4 +1,4 @@
-"""uv run train c --tokens N [--fold K] and uv run train sh --c RUN [--teacher h]: C, the large model, and SH, the
+"""uv run train c --tokens N [--fold K] and uv run train sh --c RUN: C, the large model, and SH, the
 student, trained on the inputs `uv run trainset` writes.
 
 C is XLM-RoBERTa-large ([train.c] base, the pinned copy in data/) with a fresh head of eight sigmoid outputs: the seven
@@ -30,15 +30,14 @@ max_tokens, the base revision, the settings and what the run was made from). A t
 
 SH ([train.sh], the pinned e5-small copy; models.new_sh) trains on cascade-route train-split judged Paper lines, with the
 trainset's SH line ids and features. Each line's teacher target is the logits of the fold model of C run RUN that did
-not train on its run (c-<N>-fold<K>/teacher.parquet; with --teacher h, the mean of H's models in [train.sh] h at the
-length they were trained at, cached in <[train] out>/teacher-h.parquet). The loss is the soft BCE of SH's logits / T
+not train on its run (c-<N>-fold<K>/teacher.parquet). The loss is the soft BCE of SH's logits / T
 against sigmoid(teacher / T), times T^2, on all eight outputs, plus the hard BCE on the outputs a line takes part in
 (as C's), summed and divided by the number of terms. Batches are chunks of consecutive lines of one log file, shuffled.
 AdamW in three groups (e5-small, the new layers, the head and final norm), warm-up then linear decay over [train.sh]
 epochs, bf16 autocast. After every epoch SH scores the validation lines in fp32; the epoch kept is the one where SH
 passes, at the bundle's pass share (data/v4/bundle.toml [thresholds] pass_share), the largest share of the validation
 lines RUN holds at the hold share [train.sh] epoch_hold names (C's own top share of the lines RUN scored); training stops
-[train.sh] patience epochs after the best. Writes <[train] out>/sh-RUN/ (sh-h/ for H): SH's model folder (as `export`
+[train.sh] patience epochs after the best. Writes <[train] out>/sh-RUN/: SH's model folder (as `export`
 loads it), scores.parquet (dossier, id, period, sh_<out> of the kept epoch, fp32), train.json and input.json.
 
 Both trainers save verified model, optimizer, scheduler and random state after every epoch. The same command resumes
@@ -906,67 +905,6 @@ def fold_teacher(cfg, root, run_name, crun, D):
     return z[tr], desc, used
 
 
-def h_teacher(cfg, root, D):
-    """H's teacher scores of SH's training lines: the mean logits of the models in [train.sh] h, each at the length it
-    was trained at (its input.json max_len), bf16, on the trainset's C ids at that length; every training line's
-    scores cached in <[train] out>/teacher-h.parquet (not for a run with --limit)."""
-    import filecmp
-
-    import pandas as pd
-    import torch
-
-    from . import trainset
-    from .base import path as base_path
-    from .core import record_inputs
-    from .models import load_c
-    h = cfg.path(cfg["train"]["sh"]["h"])
-    models = sorted(p for p in h.iterdir() if (p / "config.json").exists()) if h.is_dir() else []
-    if not models:
-        raise SystemExit(f"[train.sh] h: no model folder in {h}")
-    tokens = set()
-    for p in models:
-        info = json.loads((p / "input.json").read_text(encoding="utf-8"))
-        if info.get("outputs") != I.OUTS:
-            raise SystemExit(f"{p}: outputs {info.get('outputs')}, not {I.OUTS}")
-        if not filecmp.cmp(p / "tokenizer.json", base_path(cfg, "c") / "tokenizer.json", shallow=False):
-            raise SystemExit(f"{p}: tokenizer.json is not the C base's, which the trainset's C ids are made with")
-        tokens.add(int(info["max_len"]))
-    if len(tokens) != 1 or next(iter(tokens)) not in D["made"]["c_tokens"]:
-        raise SystemExit(f"H's models were trained at {sorted(tokens)} tokens; the inputs hold C's ids at "
-                         f"{D['made']['c_tokens']}")
-    n = tokens.pop()
-    d = trainset.folder(cfg)
-    lines, tr = D["lines"], D["tr"]
-    cache = root / "teacher-h.parquet"
-    mf = {"inputs": fingerprint(d / "inputs.json"), "models": {p.name: fingerprint(p) for p in models}, "tokens": n,
-          "rule": "the mean of the models' logits, fp32 weights under bf16 autocast"}
-    desc = f"H: the mean of {', '.join(p.name for p in models)} ({h}) at {n} tokens, bf16"
-    used = {"models": mf["models"], "tokens": n}
-    limited = D["counts"]["train"] != D["counts"]["train_all"]
-    if not limited and is_current(cache, mf):
-        log.info("H's teacher scores: %s is current", cache)
-        tz = pd.read_parquet(cache)
-        if not (tz.dossier.to_numpy() == lines.dossier.to_numpy()[tr]).all() or \
-                not (tz.id.to_numpy() == lines.id.to_numpy()[tr]).all():
-            raise SystemExit(f"{cache} does not hold the training lines in order; delete it")
-        return tz[[f"z_{o}" for o in I.OUTS]].to_numpy(np.float32), desc, used
-    ids, off = trainset.ragged(d / f"c-{n}.npy")
-    z = np.zeros((len(tr), len(I.OUTS)), np.float32)
-    for p in models:
-        m = load_c(p, torch.device("cuda"))
-        z += teacher_logits(m, ids, off, tr, f"H {p.name}")
-        del m
-        torch.cuda.empty_cache()
-    z /= len(models)
-    if not limited:
-        tz = pd.DataFrame({"dossier": lines.dossier.to_numpy()[tr], "id": lines.id.to_numpy()[tr]})
-        for k, o in enumerate(I.OUTS):
-            tz[f"z_{o}"] = z[:, k]
-        tz.to_parquet(cache, index=False)
-        record_inputs(cache, mf)
-    return z, desc, used
-
-
 def train_sh(cfg, args):
     import shutil
     import tomllib
@@ -985,7 +923,7 @@ def train_sh(cfg, args):
         raise SystemExit(f"--c {args.c} is a teacher fold; name the C run whose folds teach")
     if crun.get("smoke") and not (args.limit or args.max_steps):
         raise SystemExit("a smoke C can teach only a smoke SH; set --limit or --max-steps")
-    name = f"sh-{args.c}" if args.teacher == "folds" else "sh-h"
+    name = f"sh-{args.c}"
     if (args.limit or args.max_steps) and not name.endswith("-smoke"):
         name += "-smoke"
     out = root / name
@@ -1023,10 +961,7 @@ def train_sh(cfg, args):
     vhold = D["hold"][va]
 
     limit_gpu_memory(log)
-    if args.teacher == "folds":
-        S, teacher, used = fold_teacher(cfg, root, args.c, crun, D)
-    else:
-        S, teacher, used = h_teacher(cfg, root, D)
+    S, teacher, used = fold_teacher(cfg, root, args.c, crun, D)
     c = D["counts"]
     log.info("%s: train %s lines (hold = 1 %s, hold out %s, kind-masked %s), val %s (hold = 1 %s), test %s; teacher "
              "%s; epoch rule: the share of %s's top %g%% of validation lines by C's hold logit that SH passes at %g%% "
@@ -1129,8 +1064,6 @@ def main():
     sh = sub.add_parser("sh", help="train SH")
     sh.add_argument("--c", required=True, help="the C run (a folder under [train] out) whose validation holds choose "
                                                "SH's epoch, and whose teacher folds teach SH")
-    sh.add_argument("--teacher", choices=["folds", "h"], default="folds",
-                    help="the teacher: the C run's teacher folds, or H ([train.sh] h) for the check against it")
     sh.add_argument("--limit", type=int, default=0, help="a smoke run on this many training lines, drawn with seed 0")
     sh.add_argument("--max-steps", type=int, default=0,
                     help="a smoke run: each epoch stops after this many steps, the run after its second epoch")

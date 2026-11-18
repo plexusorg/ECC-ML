@@ -143,7 +143,6 @@ warmup = 0.06
 clip = 1.0
 seed = 1
 epoch_hold = "2pct"
-h = "{work}/spikes/gate/hold/models"    # H, the teacher of `train sh --teacher h`: a folder per model
 
 # `export` converts the completed C classifier and checks the real CPU graph against Torch.
 [export]
