@@ -725,8 +725,15 @@ def readme_text(cfg):
 
 
 def ship_thresholds(cfg, f):
-    """Validate calibrated slot thresholds. Keep the owner's original private files unchanged."""
-    slot_thresholds(cfg, f)
+    """Validate calibrated slot thresholds and refuse a C that must hold more validation chat than the ceiling to
+    hold every validation offender in time (src/ecc/calibrate.py)."""
+    t = slot_thresholds(cfg, f)
+    if not t["ceiling_ok"]:
+        held = t["traffic"]["val"]["recall"]
+        raise SystemExit(
+            f"C holds {held['model_held']} of {held['covered']} covered validation lines at its offenders cut "
+            f"{t['hold_offenders']:.3f}, over the {t['ceiling']} ceiling {t['hold_' + t['ceiling']]:.3f}: it cannot "
+            "hold every validation offender in time without holding too much chat; train a better C")
 
 
 def build(cfg):

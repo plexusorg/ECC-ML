@@ -336,9 +336,11 @@ Each C run has a slot at `<[export] out>/<C folder name>/`:
    The conversion checks real Torch outputs on several sequence lengths.
 2. `torch.parquet`: all eight C logits for every covered judged validation and test key. Rejected keys remain in the
    table with absent logits. The selected immutable table supplies the full causal runs.
-3. `thresholds.json`: diagnostic `1pct` and `2pct` thresholds and a named `recall` threshold. Calibration uses validation
-   only. Recall is the minimum known covered hold-positive validation logit minus the allowed CPU logit error.
-   Kind thresholds are hints. They do not clear a hold. The file records exact model, table and hold-label sources.
+3. `thresholds.json`: the hold cuts `src/ecc/calibrate.py` sets, on validation only. `1pct` and `2pct` hold that
+   share of the covered validation lines. `offenders` is the highest cut that holds, in every validation sitting with
+   a hold-positive line, a positive line or its ban line at or before the sitting's first ban line, less the allowed
+   CPU logit error. `recall`, the served default, is the lower of `2pct` and `offenders`; `ceiling_ok` is false when
+   `offenders` is under `2pct`, and bundle then refuses the slot. Kind thresholds are hints. They do not clear a hold. The file records exact model, table and hold-label sources.
    It reports model-held, input-rejected and total traffic counts separately.
 4. `parity.json`: the actual CPU graph outputs against Torch on identical inputs, for all eight outputs and all named
    thresholds. Run `--full` for all validation and test keys. Use `--sample N` to change the sample size or `--files N`
@@ -398,10 +400,12 @@ Run `uv run bundle --no-upload` to build and check the C-only bundle in `<work>/
 calibrated thresholds from the C export slot. It keeps the owner's private threshold file and old README template
 unchanged. It preserves the private judge settings and texts.
 
-Before creating or reusing a bundle, the build checks the required accounts in private `[eval] known_offenders`.
-Each account must have judged owner-positive hold targets in the selected export batch.
-Every such target must be covered and pass the real C CPU graph at the fixed calibrated recall threshold.
-Missing bindings, rejected inputs, nonfinite logits or missed positives block the build and its upload workflow.
+Before creating or reusing a bundle, the build refuses a slot whose `ceiling_ok` is false: a C that must hold more
+than 2% of validation lines to hold every validation offender in time. It then checks the required accounts in private
+`[eval] known_offenders`. Each account must have judged owner-positive hold targets in the selected export batch.
+Every owner-ruled sitting of theirs must have a line, a positive line or the first ban line, held by the real C CPU
+graph at the calibrated recall threshold at or before that ban line. Missing bindings, rejected inputs, nonfinite
+logits or a missed sitting block the build and its upload workflow.
 Read the private result in the export slot's `known-offenders.json`.
 
 - `models/`: only `c.xml`, `c.bin` and `c_tokenizer.json`.

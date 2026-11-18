@@ -4,8 +4,7 @@ The slot is <[export] out>/<C folder name>. It contains models/c.xml and c.bin,
 C-only torch.parquet, validation-only thresholds.json and parity.json. Reject
 incomplete targets before context. Score every covered target with C. Preserve
 raw preparation, model meaning, canonical links and the trained C token budget.
-Use the named recall threshold by default. Its guard covers the allowed CPU
-logit error. Diagnostic 1pct and 2pct thresholds use covered validation targets.
+The named thresholds and the served default are set as src/ecc/calibrate.py states.
 Keep model-held, input-rejected and total traffic counts separate. Never choose
 thresholds from test outcomes. Refuse smoke, fold, research or changed weights.
 """
@@ -24,6 +23,7 @@ from pathlib import Path  # noqa: E402
 import numpy as np  # noqa: E402
 
 from . import inputs as I  # noqa: E402
+from .calibrate import C_TOLERANCE, SHARES, calibrate  # noqa: E402
 from .core import fingerprint, is_current, log, progress, record_inputs, run, write_text  # noqa: E402
 
 GRAPHS = ("c",)
@@ -31,7 +31,6 @@ GRAPHS = ("c",)
 COMPILE = {"INFERENCE_PRECISION_HINT": "f32", "INFERENCE_NUM_THREADS": 6, "PERFORMANCE_HINT": "LATENCY",
            "NUM_STREAMS": 1}
 NEAR = 0.01             # sampled lines: every line whose torch score is this close to a threshold
-C_TOLERANCE = 1e-3
 SEED = 20261114
 
 
@@ -303,17 +302,11 @@ def torch_scores(cfg, f, df, meta):
 
 # ---------------------------------------------------------------- 2b. thresholds
 
-def kth(scores, k):
-    """The k-th highest score: holding score >= it takes k lines (more on a tie)."""
-    if not 1 <= k <= len(scores):
-        raise ValueError(f"the {k}-th highest of {len(scores)} scores")
-    return float(np.sort(np.asarray(scores, np.float64))[::-1][k - 1])
-
-
 def calibration_sources(cfg, f):
     """The exact score, selected table and selected hold-label files used for calibration."""
     from .trainset import hold_path
     from .base import sha256
+    from .core import source_hash
     table = lines_path(cfg)
     hold = hold_path(cfg, cfg["export"]["batch"])
 
@@ -322,7 +315,7 @@ def calibration_sources(cfg, f):
 
     return {"torch": fingerprint(f["out"] / "torch.parquet"), "mode": "c_only", "period": "val",
             "table": mark(table), "hold": mark(hold), "guard_band": C_TOLERANCE,
-            "hold_shares": {"1pct": 0.01, "2pct": 0.02}}
+            "hold_shares": SHARES, "code": source_hash("calibrate", "inputs")}
 
 
 def thresholds_made_from(cfg, f):
@@ -361,73 +354,13 @@ def slot_stale(cfg, f):
     return None
 
 
-def calibrate(t, meta, judged, labels):
-    """Calibrate actual scored keys against their complete source table and hold labels.
-
-    Return numerical evidence only. Release code adds and verifies model and immutable-file provenance.
-    """
-    key = ["dossier", "id"]
-    if t.duplicated(key).any() or not t[key + ["period"]].equals(meta[key + ["period"]]):
-        raise SystemExit("calibration scores do not contain the exact validation/test keys and periods")
-    if not t.coverage.isin(["c", "reject"]).all() or any(c.startswith("sh_") for c in t):
-        raise SystemExit("calibration requires explicit C-only scores")
-    expected = judged[judged.split.isin(["val", "test"])][key + ["split"]].rename(columns={"split": "period"})
-    if not meta[key + ["period"]].reset_index(drop=True).equals(expected.reset_index(drop=True)):
-        raise SystemExit("calibration requires every judged validation/test source key and its exact period")
-    if judged.duplicated(key).any() or labels.duplicated(key).any():
-        raise SystemExit("calibration source has duplicate label keys")
-    if set(map(tuple, judged[key].to_numpy())) != set(map(tuple, labels[key].to_numpy())):
-        raise SystemExit("hold labels must match every judged table key exactly")
-    if not labels.hold.isin([-1, 0, 1]).all():
-        raise SystemExit("calibration needs explicit known or masked hold labels")
-    lab = t[key].merge(judged[key + I.KINDS], on=key, how="left", validate="1:1")
-    lab = lab.merge(labels, on=key, how="left", validate="1:1")
-    if lab[I.KINDS + ["hold"]].isna().any().any():
-        raise SystemExit("calibration scores have missing labels")
-    val = t.period.to_numpy() == "val"
-    covered = t.coverage.to_numpy() == "c"
-    calibration = val & covered
-    positive = calibration & (lab.hold.to_numpy() == 1)
-    z = t.c_hold.to_numpy(np.float64)
-    if not calibration.any() or not positive.any():
-        raise SystemExit("recall calibration needs covered validation targets and known hold-positive evidence")
-    if not np.isfinite(t.loc[covered, ["c_" + o for o in I.OUTS]].to_numpy()).all():
-        raise SystemExit("covered C logits are not finite")
-    hold = {k: kth(z[calibration], max(1, int(np.ceil(share * calibration.sum()))))
-            for k, share in {"1pct": 0.01, "2pct": 0.02}.items()}
-    hold["recall"] = float(z[positive].min() - C_TOLERANCE)
-    marks = {k: int((lab[k].to_numpy()[calibration] == 1).sum()) for k in I.KINDS}
-    kinds = {k: min(kth(t["c_" + k].to_numpy()[calibration], count), 0.0) if count else 0.0
-             for k, count in marks.items()}
-    traffic = {}
-    for period in ("val", "test"):
-        rows = t.period.to_numpy() == period
-        total = int(rows.sum())
-        traffic[period] = {name: {"total": total, "covered": int((rows & covered).sum()),
-            "rejected": int((rows & ~covered).sum()),
-            "model_held": int((rows & covered & (z >= threshold)).sum()),
-            "blocked": int((rows & ((~covered) | (z >= threshold))).sum())}
-            for name, threshold in hold.items()}
-    out = {"scoring": {"mode": "c_only"}, "default": "recall",
-           **{"hold_" + k: v for k, v in hold.items()}, "val_lines": int(calibration.sum()),
-           "guard_band": C_TOLERANCE,
-           "validation_hold_positive": int(positive.sum()),
-           "validation_hold_labels": {str(k): int((calibration & (lab.hold.to_numpy() == k)).sum())
-                                      for k in (-1, 0, 1)}, "traffic": traffic,
-           "set_on": "Validation only. Recall is the minimum known covered hold-positive C logit minus the "
-                     "allowed CPU parity error. Diagnostic 1pct and 2pct apply to covered validation targets.",
-           "kinds": kinds, "kind_marks": marks,
-           "kinds_set_on": "Validation kind quantiles capped at zero; diagnostic hints only, never a clearance gate."}
-    return out
-
-
 def set_thresholds(cfg, f, meta, t):
     """Write validation calibration only after checking exact model and source provenance."""
     import pandas as pd
     from .trainset import hold_path
     provenance = thresholds_made_from(cfg, f)
     table = pd.read_parquet(lines_path(cfg))
-    labels = pd.read_parquet(hold_path(cfg, cfg["export"]["batch"]), columns=["dossier", "id", "hold"])
+    labels = pd.read_parquet(hold_path(cfg, cfg["export"]["batch"]), columns=["dossier", "id", "hold", "sitting", "ban_here"])
     out = calibrate(t, meta, table[table.judged].copy(), labels)
     out.update(coverage_tokens=c_run(f["c"])["max_tokens"], models=model_marks(f), made_from=provenance)
     path = f["out"] / "thresholds.json"
