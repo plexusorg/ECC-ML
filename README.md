@@ -5,36 +5,28 @@ Module-ECC on the game server, plus the measurements that decide whether it ship
 `uv run status` shows where you are.
 
 ```text
-raw logs -> ingest -> candidates -> label -> merge -> trainset -> train -> export -> eval -> bundle -> promote
-                                                                           review, redteam (slow check vs. Bedrock)
+raw logs -> dossier -> read -> truth -> labels       (the labels)
+trainset -> train -> export -> eval -> bundle -> promote
 ```
 
 ## Setup
 
-1. Install [uv](https://docs.astral.sh/uv/), then run `uv sync`.
+1. Install [uv](https://docs.astral.sh/uv/), then run `uv sync`. The project requires Python 3.13 and its Unicode 15.1 tables.
 2. Private data lives in `data/` (gitignored, backed up whole). On a new machine, `uv run restore` fills it from the
-   newest backup (see backup), including `data/local.toml`. The chat logs are in `data/raw/<source>/`, one folder per
-   `[ingest]` source. What the pipeline rebuilds (models, bundles, eval scores, the train and val tables, logs, tools)
-   goes to a work folder outside the repository, never backed up. `data/local.toml` holds the machine's paths:
+   newest backup (see backup), including `data/local.toml`. The chat logs are in `data/raw/`. What the pipeline
+   rebuilds (models, bundles, eval scores, the train and val tables, logs, tools) goes to a work folder outside the
+   repository, never backed up. `data/local.toml` holds the machine's paths:
 
    ```toml
    [paths]
    work = 'C:\path\to\ECC-ML-work'          # what the pipeline rebuilds
-   models = 'C:\path\to\gguf\files'       # base models for the baseline
-   llama = 'C:\path\to\llama.cpp\build'    # holds llama-server.exe and llama-quantize.exe
-   llama_src = 'C:\path\to\llama.cpp'      # source checkout of the same build, for convert_hf_to_gguf.py
-
-   [eval]
-   known_offenders = ["name1", "name2"]    # must trigger on the real log
    ```
 
-3. Copy `.env.example` to `.env` (gitignored) and fill in the credentials you use: the W&B key for `bundle` and
-   `promote`, the Bedrock key for `redteam`, the Telesphorepo read token for `restore`.
-4. For `label`, install the Codex CLI and log in (`codex`).
+3. Copy `.env.example` to `.env` (gitignored) and fill in the W&B key for `bundle` and `promote`. `backup` and
+   `restore` use the telesphorepo CLI as the account this computer is logged in as (`telesphorepo login`).
+4. For `read`, install the Codex CLI and log in (`codex`).
 
-Every setting lives in `ecc.toml`. `export` writes the classifier's GGUF and tokenizer to `data/classifier.toml` and
-`eval` adds its Platt parameters, the decision thresholds are in `data/decision.toml`, and `data/local.toml` overrides
-all of them. Each run writes a full log to `<work>/logs/`.
+Every setting lives in `ecc.toml`, and `data/local.toml` overrides it. Each run writes a full log to `<work>/logs/`.
 Ctrl+C stops a step and keeps all finished work. Run the same command again to continue from that point.
 
 ## Repository layout
@@ -43,272 +35,448 @@ Ctrl+C stops a step and keeps all finished work. Run the same command again to c
 | --- | --- |
 | `src/ecc/` | The steps. |
 | `data/` | Private: gitignored, backed up whole to Telesphorepo. Everything the pipeline cannot rebuild. |
-| `data/raw/<source>/` | The chat logs of each `[ingest]` source. |
-| `data/policy.md` | The rulebook. Labeling and the slow check both read it. |
-| `data/labeling/` | Codex's labeling instructions and the term lists that choose which messages are labelled. |
-| `data/prompts/` | The slow check's system prompt (`slow-check.txt`, with the policy in place of `{policy}`) and the prompted baseline models' prompts. |
-| `data/cases/<set>/` | One folder per eval and red-team set: its case files (`.txt`) and expected roles (`.json`). `attacks/` builds its set in code. |
-| `data/synthetic/` | Written training conversations (`[trainset] extra`); `data/briefs/` holds the briefs they were written from. |
-| `data/decision.toml` | The deployed decision thresholds. |
+| `data/raw/` | The chat logs: the Total Freedom server's Paper logs (`tf/`, `tf-old/`) and Creayun's Discord exports (`creayun/`). |
+| `data/policy.md` | The rulebook. The slow check reads it. |
+| `data/v4/` | The v4 reader batches (`batches/`: parts, reads, truth tables), the readers' questions, and what the v4 bundle is built from besides the models: its thresholds, settings and the judge's texts (`data/v4/README.md`). |
+| `data/models/base/<repo>@<sha>/` | The base models of C and of SH's line encoder at their pinned commits (base models, below). |
+| `data/v4/models/C-s2/` | The shipped C, which ranks the training lines (`[train] ranker`); its `input.json` holds its base revision and `max_tokens`. |
+| `data/rulings/` | The owner's saved rulings, their reviewed derivatives and the scripts that built the ruling pages. Select the judge's rulings with `[bundle] rulings`. |
 | `data/local.toml` | This machine's paths and private settings. |
-| `<work>/` | `[paths] work`, outside the repository, never backed up: models, bundles, eval scores, the train and val tables, the review queue, logs, tools, and notes. |
+| `<work>/` | `[paths] work`, outside the repository, never backed up: models, bundles, eval scores, the train and val tables, logs, tools, and notes. |
 
-## ingest
+## dossier
 
-Reads every source in `[ingest] sources`: Paper server logs (`YYYY-MM-DD-n.log.gz`, `latest.log`) and Discord
-"flagged" exports. Writes `messages.parquet` and `state/ingest.json` in `[ingest] folder` (`--folder` overrides it),
-one row per message: id, source, server, time, channel, conversation, speaker, target, text and repeats.
+`uv run dossier BATCH` builds the parts of a reader batch from the raw chat and checks them. A batch is a folder under
+`[dossier] batches`: `manifest.json` (its sources and what was built from them), `parts/`, `reads/<read>/` and
+`truth.parquet`. `--files GLOB...` starts a Paper batch from log files under `[dossier] logs` (`tf/2026-11-1*.log.gz`);
+`--creayun` starts a Creayun batch of every server and day of `[dossier] messages`
+(`data/v4/creayun-messages.parquet`): Creayun's chat and private messages read from its Discord exports, one row per
+message with its time to the minute, each numbered by `row`.
 
-- **Ids.** A message's id is a hash of its server, time, author account, channel, private-message target, raw text and
-  its occurrence number among identical messages in its file. Every run reads all files again, so the same files give
-  the same ids in any order; a grown `latest.log` keeps the ids of its earlier lines, and a `latest.log` seen again as
-  its rotated dated file adds nothing. Stored rows keep their place and new ones are appended. A stored id that the
-  files no longer produce stops the run.
-- **Dates.** A Paper log's day comes from its file name. `latest.log` takes the day of a full timestamp printed in it
-  (Module-Guilds prints them), else the day its rotation implies.
-- **Captured:** public chat; private messages (`/msg`, `/tell`, `/w`, `/r`, `/mail send`, partial names resolved
-  against the players online, so a pair is one conversation); `/me` (in public chat's conversation); `/nick` (beside
-  public chat); guild chat from Module-Guilds' `[GUILD - <guild>:<id>]` console line (one conversation per guild and
-  day). From Creayun exports also item names and lore (`item`), books (`book`, title and pages) and signs (`sign`).
-- **Speakers are accounts.** Paper chat lines show display names; ingest resolves them to accounts from login lines,
-  `/nick` commands, lookalike letters and who is online. A `/sudo <player> c:` line is credited to the player who ran
-  it.
-- **Dropped:** staff chat (`/o`, `/ac`, `/adminchat`, `[ADMIN]` lines), `/say`, the `/g`, `/gc` and `/guild`
-  commands, server output in chat (`* me …` echoes of forced commands, messages that are only target selectors), raid
-  accounts, and § colour codes in text. A player's exact repeats in a conversation within 60 seconds are one message
-  whose `repeats` counts the copies, as the deployed duplicate rule treats them.
+- **A dossier** is one Paper log file (one uptime or one day), or one Creayun server on one day, one line per event:
+  `<id> <time> <channel> <speaker>: <text>`. `L<n>` is line n of the log file (for Creayun, the message whose `row` is
+  n); `R<n>` is line n of that day's ECC-Server record (`[dossier] record`, v3 or v4), from which
+  signs, books, item names and lines typed while muted come (a sign or item name set by command, which a v4 record
+  also holds, is read from the log). Ids stay the same across rebuilds.
+- **Muted and held lines.** NUSH logs a quarantined player's chat line as `[NUSH] <line>`, hiding some and marking the
+  next with ` (+N more)`; it is a `muted` line by the account, the mark removed, unless the day's record holds the
+  same line. A chat or guild line Module-ECC held reaches the log only when it is delivered, on the module's
+  `Plex-ECC-Actions` or `Plex-ECC-Asker` thread; it is read at its `Held <account>'s public chat: <text>` alert, where
+  it was held, with the name the delivery shows. When its file holds no delivery (a line never delivered, or delivered
+  after midnight), it is the line ECC-Server received as the v4 record holds it, with the shown name and raw text the
+  judge was given (the record's line of the same channel and text near the alert, by the account's UUID from the
+  log's `UUID of player` line); only where the record does not hold it is it read from the alert alone, its account
+  as the name and the alert's text.
+- **Text.** Each text is prepared as `src/ecc/inputs.py` states, the rules ECC-Server applies to the raw text the
+  plugin sends (bundle.json `text`): colour codes removed, line breaks as ` / `, whitespace collapsed, links over 60
+  characters and texts over their channel's limit cut, addresses as `[ip]`. A text empty once prepared makes no line.
+- **Speakers.** The name as shown (colour codes, icon codes and `[Not Secure]` removed), with `=account` when the shown
+  name does not contain the account it resolved to through the log's player tracking (`src/ecc/parse.py`; only an
+  online player is ever the answer). A log file that continues a run starts from the player state at the end of the file before (who is
+  online, nicknames, message partners, pending `/sudo`, the accounts' UUIDs), so a player online since before midnight
+  keeps their account; a file that starts a run starts with nobody known. A chat name ends at the first ` » ` unless
+  it shows no player and a name ending at a later one does (a tag ending in `»`). A chat line the day's record holds
+  takes the record's account. Module-Guilds' guild chat is read from its `[GUILD - <guild>:<id>]` console line on
+  any thread; a `[Guild]` tag before a chat name is part of the shown name of a public chat line.
+- **Commands.** EssentialsX's `/msg`, `/r`, `/mail` and `/me` are read under every alias its plugin.yml gives them, and
+  a typed player name resolves as EssentialsX's `matchUser` resolves it (UUIDs, name prefixes, nicknames). A command
+  EssentialsX sends to no one (a `/msg` to an offline or unknown player, a `/r` with no one to answer) makes no line,
+  and neither does a `me`, `say`, `msg`, `reply` or `mail` command NUSH cancelled for a quarantined player (its feed
+  line `[NUSH] <account>: <command>` follows it, or the feed showed one of that player's lines in the 10 seconds
+  before). `/mail sendall` is one line to `*`.
+- **Addresses.** None is written. A join shows `from addr-NN`, an alias numbered by first appearance within the
+  dossier; IPv4 and IPv6 addresses inside any shown field become `[ip]`.
+- **Authentication.** Every login, register, password or `/shib` command (typos and plugin prefixes included) is
+  dropped with its arguments, as is any line whose text is such a command, and any line in which its speaker repeats a
+  word they typed to one of those commands in the same log (for Creayun, in any export: the word is replaced by
+  `[secret]`, and the line is dropped if that misses it). For Creayun, e-mail addresses, keys and ids in links, tokens,
+  passwords stated in a sentence, card numbers and key-like strings are replaced by placeholders. Only counts are kept.
+- **Left out:** staff chat, console output, moderation notices. A speaker's exact repeats on one channel within 60
+  seconds fold into one line, `[sent N times until T]`; a log file that continues a run (`dossier.runs`: a file
+  without the startup line continues the uptime of the file before it) folds copies of the file before's lines too.
+- **Parts** hold at most 12,000 tokens (characters / 3), cut at the longest quiet gap in the last 40% of each part's
+  room; a later part starts with the 30 lines before its cut and a `--- part N begins here ---` marker.
 
-Takes about a minute for 2.2M messages.
+On a batch that has parts, the step rebuilds them, cut where the saved parts were cut, and compares them byte for
+byte with the saved ones. It writes only when the batch has no parts or no read has answered them; otherwise a part
+that differs is reported and the saved parts stay, with the count of parts `--rewrite` would read again.
+`--rewrite NAME` writes them anyway: the saved parts and manifest, and every read's answers to a part whose body gains
+a line or shows one of its lines with another speaker or addressee, go to `[dossier] history/NAME/<batch>/` with
+`rewrite.json` (the parts rewritten, the parts to read again with the lines they gain and the lines that show another
+speaker, the lines no longer built); `uv run read` then answers the parts whose answers moved. A part whose body
+changes only in text keeps its answers. Every run ends with the check, and `--check` runs only the check: no IPv4 or IPv6 address, no
+authentication command as a line's text, no authentication word in its typist's own lines, and for Creayun none of the
+secret shapes. It prints line ids and lengths, never text. The Paper batches take seconds, Creayun about a minute.
 
-## candidates
+## read
 
-Reads `messages.parquet`. Finds risk-term hits (`risk` in `data/labeling/terms.toml`) and the rows listed in
-`data/audit/rows.jsonl` (one `{"row": n}` per line, such as high-scoring rows of the eval set `outside`), and merges
-each with 8 lines before and 4 after into conversation windows. `data/windows.jsonl` only grows: every hit outside all
-existing windows gets a new window, so new messages and new risk terms add windows without changing the labelled ones. A
-new window may share context lines with an existing one; merge keeps the existing label for those lines. New windows go
-into new Codex shards (`data/label/shards/*.txt`, 50 windows each, indexed in `shards.json`), and `uv run label` labels
-only those. Lines outside every window are ok without labeling. The step refuses to run when a window's line no longer
-matches its row in `messages.parquet`. Takes about a minute.
+`uv run read BATCH READ` has the Codex CLI read every part of a batch that has no answer from that read yet, each part
+in its own ephemeral session (read-only sandbox, an empty working folder in `<work>/read/`, no user config or rules),
+`--parallel N` at a time up to the reader's `max_parallel`. A read is named `<reader>-<copy>` (`codex4-a`, `codex4-b`):
+every copy of a reader sends the question its `[read.readers.<reader>]` entry names in `[read] questions`, then the
+part. A "marks" reader answers the seven kinds on any line of the part; a "details" reader (`codex5`) is asked, per
+part, only the lines and kinds the batch's `truth.parquet` marks. Each answer is checked (JSON only, ids of the part,
+known kinds and details) and saved to `reads/<read>/<part>.json`; every attempt goes to `reads/<read>/log.jsonl` and an
+answer that fails the check to `reads/<read>/invalid/`. A part that fails the dossier check is never sent. After
+`[read] stop_after` usage-limit answers in a row the run starts nothing new; run it again later to continue.
 
-## label
+- `--disputed` reads only the parts the batch's `disputed.json` lists: the third read (`codex4-c`).
+- `--parts a,b`, `--limit N` narrow the run; `--out DIR` saves the answers elsewhere.
+- `--dry-run` writes each prompt beside its working folder and shows the command, without calling Codex.
 
-Runs `codex exec` on every shard (`gpt-6.1-sol`, medium effort, 8 at a time) and writes `data/label/out/<shard>.jsonl`.
-Each output is checked against its shard: every window once, rows inside the window, known labels and rules. The step
-retries shards that fail and "model is at capacity" answers. A rerun labels only what is missing or invalid.
+## truth
 
-- `uv run label --check` checks the outputs without running Codex.
-- `uv run label --select-regrade 2026-11-02T21:30` builds regrade sets (`data/label/regrade/`) from shards labelled
-  before that time: likely misses (lures, pro-pedophile phrasing) and likely over-bans (sexual rules on lines with no
-  sexual words). The next `uv run label` labels these into `data/label/regrade_out/`.
-- `uv run label --select-unsure` builds a regrade set (`data/label/unsure/`) of every window whose current label is
-  marked unsure, shuffled, and the next `uv run label` labels it into `data/label/unsure_out/`. Codex sees the same
-  instructions as in the first pass and not the earlier labels.
-- `uv run label --limit 8` labels at most 8 of the shards left, for a trial batch.
+`uv run truth BATCH...` builds each batch's line table from its reads: `truth.parquet` and `disputed.json`.
+Select the table versions with `[truth] tables`. Keep the reader parts and manifests
+under `[dossier] batches`. To change labels, use `--out NEW_FOLDER` for all selected batches, verify the new tables,
+then select that folder. The command keeps an identical existing table and refuses to replace a changed one.
 
-The full corpus takes a few hours.
+Each row represents one player line with the seven kinds, the account, the sitting (`<dossier>|<account>`), up to 5 earlier lines of its
+conversation within 5 minutes, and the split. A Paper row also has its run (one server uptime over its log files;
+rows are in run order) with `time` counting from the midnight of the run's first day, and what the plugin sends for
+the line: `raw_text`, `raw_shown` and the `copies` folded into it. Per kind, from reads a and b (`[truth] reads`): 1 when both marked the
+line, -1 when one did, 0 when neither; on a part the third read (`[truth] third`) answered, two of three decide. A line
+a read listed as unsure and no read marked is -1 on every kind; off_server is 0 on a line whose links are all on
+`[truth] allowlist` after meaning normalization. The original reader value remains in `off_server_raw`.
+A line holding a text of `[truth] left_out` is -1 on every kind. `disputed.json` lists the parts,
+and their lines, a third read should cover.
 
-## merge
+A Paper batch needs both reads on every part. Its dossiers are rebuilt from the logs for each line's account, raw
+text and fields, and the build stops unless every rebuilt part is byte for byte the part the reads read
+(`uv run dossier BATCH --rewrite NAME` writes the rebuilt parts). A Creayun batch takes the parts both reads have answered, rebuilt from the message table and compared byte
+for byte; the account is the shown name, and its rows are in dossier order, each dossier's parts by part number. The
+split is the one period rule, `[periods]`: a log file of the `owner` batch (`full`) is `train` before `val_from`,
+`val` before `test_from` and `test` from then on, by its date; every line of the other Paper batches is `train`; a
+Creayun dossier is `test_creayun` when a hash of its name falls in `[truth] test_share` (15%), else `train`.
+`--out DIR` writes the tables to `DIR/<batch>/`. All four batches take about three minutes.
 
-Reads the shard outputs, the regrade outputs and `data/corrections.jsonl`. When sources disagree, a correction beats the
-unsure regrade, which beats the regrade sets, which beat the first pass. Writes `data/labels.parquet` (row, label
-`ban`/`amb`/`ok`, rule, window) and `data/roles.jsonl`. Hand fixes in `corrections.jsonl` are kept every time the labels
-are rebuilt. Takes seconds.
+## labels
+
+`uv run labels [BATCH...]` makes the hold labels: from the truth tables of the `[labels] batches`, the cases a judge
+reads and the sittings the owner ruled, then from them and the judge's reads each batch's
+`data/v4/batches/<batch>/hold.parquet` (dossier, id, sitting, sitting_ruling, sitting_source, hold, ban_here). It
+writes `<work>/labels/cases.json`, `<work>/labels/owner.parquet` and `<work>/labels/sittings.parquet` (every sitting's
+ruling and `by` line). The `hold.parquet` it replaces is first copied to
+`data/label-history/hold-<the run's time>/<batch>/`; run `uv run backup` after.
+
+- **The owner's sittings.** `[labels] rulings` lists his rulings files in order; the first that rules a sitting gives
+  its ruling (block and warn are hold, no ban is not ban) and its `by` (when it names none, the next file with the same
+  ruling that names one). An entry lands on the sitting of each of its case's own lines, the player's lines of the
+  case as the owner ruled it (the ruling page, or the rendered case the entry's `cases` names); a case whose lines are
+  now on two sittings rules both, and the step lists such cases. An entry with no case lands on the judged lines whose
+  speaker has the name in its key. A file with `take = "trusted"` gives only its trusted sittings, one with
+  `take = "unsure"` only its unsure ones; an unsure entry of any other file leaves the sitting to the next file. The
+  step stops when a rulings file is missing or an entry lands on no judged line.
+- **The cases.** One per sitting with a judged line a kind marks (1), except the owner's own, those whose judged lines
+  are all spam raids (`left_out`) and those any rulings file rules. A case shows each marked or disputed line of the
+  player with the lines around it, as `data/v4/bundle.toml [judge.render]` sets for the live judge (a private message
+  within its own conversation), the player's lines `>>`, tagged by `[labels] tags`: the readers' kinds and disputed
+  kinds with whom the line is aimed at, or no tags. A case over the render's `max_chars` is cut to its marked lines,
+  then to a narrower window, then to as many marked lines, spread evenly, as fit. The owner's ruled cases dated after
+  `[labels] examples_until` are added as `[labels] cases` renders them, with id `owner|<case id>`; they measure the
+  judge and label nothing.
+- **The examples** are the owner's ruled cases `uv run bundle` packs, dated up to `[labels] examples_until`. The step
+  stops when one is dated on or after `[periods] test_from` or its lines are on a sitting that is a case.
+- **The reads.** `[labels] answers` holds a folder per read of `[labels] reads`, each answer (ruling, by, sure) keyed by
+  the SHA-256 of the case text the judge read. Answers are added as new files and never changed; a later answer to the
+  same text stands. The step stops, naming them, while a case lacks an answer in any read.
+- **The sitting rulings.** The owner's own sittings are `own`; a sitting he ruled takes his ruling (`trusted`,
+  `unsure`, `nothing`, `hold`, `ban`, `not ban`); a sitting whose judged lines are all spam raids is `spam raid`; any
+  other the reads' ruling where they agree, else `split`. A ban's `by` is a valid explicit owner line, or a line all
+  selected reads name exactly, with every answer sure and `ban`. The line must be a judged line of the sitting.
+  An inferred line has `by_from = "judge reads"`, including when the owner ruled ban without a line. For those
+  owner bans, select `[labels] reads` for his rendered cases that are cases here (after `examples_until`), and
+  `[labels] by_reads` for the others (his examples). The step stops while an answer is missing. A separate
+  `censor_after` marks possible intervention: use the valid explicit owner line, else the earliest valid line from
+  those reads, else the first line marked contact, sexual or romantic, else the first marked line. If an explicit
+  owner line is invalid, use the marked-line fallback for censoring. The censor does not establish a ban deadline.
+  `censor_from` records its source. For each judge-derived boundary, retain the case text hashes in `by_hashes` or
+  `censor_hashes` so the frozen reads can be checked.
+- **The line labels**, one per judged line: `nothing` and clean sittings hold 0; `hold` and `ban` sittings 1 on lines
+  with a kind at 1, -1 on lines whose only non-zero kinds are -1, else 0; a ban sitting -1 on every line after its
+  `censor_after`. Mark only a supported `by` line as `ban_here`; every other sitting -1 on lines with a non-zero kind,
+  else 0; spam-raid lines (`left_out`) -1. A -1 line is out of the hold loss.
+
+The three batches take under a minute.
+
+## base models
+
+C starts from `Roblox/roblox-pii-classifier-v2` (`[train.c]`) and SH's line encoder from
+`intfloat/multilingual-e5-small` (`[train.sh]`), each pinned to a commit sha. `uv run python -m ecc.base fetch`
+downloads the pinned files of a base model that has no copy into `data/models/base/<repo>@<sha>/`, through a cache of
+its own in the work folder, so the Hugging Face cache is not written; it checks each file against the hub's size and
+SHA-256 and writes `source.json` (repo, revision, each file's size and SHA-256). Training reads the copy, never the hub
+(`ecc.base.path`), and refuses a copy of another repo or revision or with a file of another size.
+`uv run python -m ecc.base check` hashes every copy against its `source.json` and checks that the ranker's
+`input.json` names the pinned C base.
 
 ## trainset
 
-Reads `messages.parquet` and `labels.parquet`. Writes `<work>/training/train.parquet` and `<work>/training/val.parquet`.
-Each example is a message with up to 29 earlier lines of its conversation, the most a classifier prompt holds. `amb`
-lines are dropped. A sample of out-of-window ok lines is added. Validation gets 5% of conversations. The case files in
-the `[trainset] extra` folders (written conversations in `data/synthetic/`) go to the training split only. The current
-Total Freedom logs and the eval case files never go into training. Takes seconds. Before written conversations go into
-an extra file, `uv run python -m ecc.leakage FILE` lists their lines that equal or nearly equal an eval-set line or a
-val text, and speakers who are real players (`--drop` removes the leaking lines).
+`uv run trainset` builds the inputs C and SH train on with `src/ecc/inputs.py`, the code export and the bundle build
+the served inputs with, into `<[train] out>/inputs/` (`<work>/train/inputs/`), about 10 minutes of CPU.
+
+- **The Paper table.** Every row of the `[train] owner` batches (full, old, old2) in one table in arrival order (by
+  run, its log files in log order, each file's rows as stored), so a run whose log files went to two batches is one
+  stream, as ECC-Server receives it. The step stops when a batch's stored order is not its runs' arrival order (time
+  running backwards, a log file out of order or in two blocks), when a merged run's time runs backwards, and when two
+  log files of one name (from two logs folders) would share a dossier or a run. A kinds-only batch
+  (`[train] kinds_only`, Creayun) is its own table in its truth order. The model text uses the same meaning
+  normalization as serving, then redacts revealed addresses and replaces allowed links with the canonical one.
+  Source records, repeat keys and judge text keep their prepared form.
+- **What it writes.** `paper.parquet` (the Paper table's rows: batch, dossier, id, run, coverage); `lines.parquet`, the lines
+  the models train and are scored on in training row order (the judged Paper lines in Paper order, then every
+  kinds-only line), with batch, run, the row in the Paper table, split, coverage, the seven kinds and the masks (`kmask`: out of
+  the kind loss); SH's line ids of every Paper row (`sh-tokens.npy`) and SH's features of every judged Paper line
+  (`sh-features.npz`, context lines as Paper rows); C's input ids of every line of `lines.parquet` at each length of
+  `[train.c] tokens` and at the length the ranker (`[train] ranker`) was trained at (`c-<N>.npy`). A ragged array is
+  one flat `.npy` and its `.offsets.npy`: row k is `ids[offsets[k]:offsets[k + 1]]`.
+- The tokenizers are the pinned base models' copies (base models, above). `inputs.json` records what the inputs were
+  made from, the source code hash, the input manifests, the lengths, the primary `coverage_tokens` and the counts.
+  The primary length is the first `[train.c] tokens` entry. Each row has a coverage route: `cascade`, `c` (bypass the
+  SH gate), or `reject`. Rejected rows retain their keys, train no loss, and never enter later context. The source
+  raw text determines whether preparation would shorten a target; Creayun raw text comes from its stable source row.
+  The step reuses current inputs.
+  Use `--force` to build them again. Ranking, exported graphs and torch scores also record their builder's source hash.
+- **The ranking.** `uv run trainset --rank` also scores the candidates for hard negatives with the ranker (`[train]
+  ranker`, a pinned trained C) at the length it was trained at, bf16 on the GPU: the train
+  lines with every kind at 0 and not kind-masked, outside `[periods] owner` (old, old2 and Creayun's train split).
+  The score is the larger of the hold logit and the largest kind logit; `<work>/train/rank.parquet` holds each
+  candidate's row of `lines.parquet`, its logits and score. Rejected rows are not candidates. The ranking serves the
+  selected coverage length and its teacher folds.
+- **The training lines.** Once every Paper batch has its `hold.parquet` (labels), `uv run trainset` writes
+  `<work>/train/pick.parquet` (row of `lines.parquet`, batch, dossier, id, reason, hold, score) in training row order:
+  every train line of `[periods] owner` (`all`); of the other Paper batches every hold = 1 line (`hold`), every
+  unmasked line with a kind at 1 or -1 (`non-zero`), the top `[train] share` (10%) of each batch's candidates by score
+  (`hard`) and a random share of its other candidates (`random`); of each kinds-only batch the same with `[train]
+  kinds_share` (5%), every line at hold -1 (out of the hold loss). A line out of both losses (kind-masked, hold -1) is
+  dropped. The random draws are `default_rng([train] seed)` over each batch's other candidates in row order, one stream
+  for the Paper batches in `[train] owner` order and one for each kinds-only batch. The step stops on a training line
+  outside the train split, a candidate without a score, a judged line without a hold label, or a `rank.parquet` made
+  from other inputs or another ranker.
 
 ## train
 
-Needs a CUDA GPU. Fine-tunes a LoRA on a base model (a Hugging Face id from the local cache, or a model folder) as a
-single-token classifier. The prompt (`classifier_prompt` in `src/ecc/chat.py`) is a fixed instruction line, then one
-`speaker: text` line per message ending in a newline, the target message last; the answer is the one token after the
-target's newline, ` ban` or ` ok`. Speaker and text are shown as a player sees them (`chat.clean`): NFKC, every
-character a player can type that ends a line becomes a space, right-to-left override runs are put in display order, and
-invisible format characters are dropped. Base64 in a message is decoded in place when it decodes to plain words
-(`chat.decode_base64`). A conversation's prompt only grows by whole lines, so each prompt is a token prefix of the
-conversation's next one and llama-server decodes only the new line. The model host builds the prompts and calls
-llama-server; it keeps a window per conversation that holds 15 to 29 earlier lines plus the target: it grows until it
-would hold 30 earlier lines and is then rebuilt from the last 15, or earlier when the prompt would pass 768 tokens
-(`WINDOW_*` in `chat.py`). 768 tokens is also the cap on every prompt in training and scoring. The model host must build
-exactly the same text. Training reads whole windows: each conversation is cut into the windows the model host builds,
-and one forward pass over a window gives every labelled line in it its loss at the token after its own newline. Causal
-attention lets that position see only the line's own prompt, so this is the same as training on each prompt alone, with
-37% fewer tokens. `[train] model` picks the model (`1.7b` or `4b`, under `[train.models]`, with each model's token
-budget and gradient checkpointing); `--model` picks another. Everything goes to `<work>/models/<model>/`:
+`uv run train c --tokens N` trains C on the trainset's inputs cut to N tokens, the length it will serve at (N must be
+the input set's recorded `coverage_tokens`), into `<[train] out>/c-<N>/`. Use the GPU for training. To select another
+serving length, change the first `[train.c] tokens` entry and rebuild the inputs.
 
-- `subset.parquet`, built once from `train.parquet`, `labels.parquet`, `messages.parquet` and the `[trainset] extra`
-  files. The labelled lines are every ban row, every row from the extra files, 110,000 ok rows from inside labelled
-  windows and 70,000 from outside them; each text is kept at most 5 times per label, and rows matching a case-file
-  text are dropped. Their conversations are cut into the model host's windows, each kept up to its last labelled
-  line; every other line (amb, unlabelled, over a cap) is context without a loss. A step holds whole windows with
-  about 32 labelled lines, and warmup and cosine follow the labelled lines seen. The same inputs give the same windows
-  (249,415 labelled lines in 103,296 windows from the current data, 8,608 of them in the 600 synthetic conversations).
-- `ckpt/step-*`, every 500 steps, with the val AUROC on 2,000 val rows (with the history the streaming window would
-  hold) in the log. The last two are kept. Ctrl+C finishes the current step and saves a checkpoint, and so does
-  `--until N` after step N; `uv run train` continues from the newest one after a stop or a crash.
-- `adapter/` and `train_done.json` at the end.
+- **The model.** `Roblox/roblox-pii-classifier-v2` (the pinned copy, base models above) with a fresh head of eight
+  sigmoid outputs, the seven kinds and hold. A kind at -1 (one read marked it, or a read was unsure) contributes no
+  loss for that output. A line with `kmask` is out of the kind loss; a line at hold -1 is out of the hold loss.
+- **The lines.** Those `<[train] out>/pick.parquet` names: the owner's lines with their hold label from each `[train]
+  owner` batch's `hold.parquet`, which must label every judged line in the inputs, then the kinds-only lines (Creayun)
+  at hold -1. The step refuses a pick outside the train split and inputs that are not current.
+- **The recipe** (`[train.c]`): AdamW, a linear warm-up then a linear decay to 0, gradients clipped, bf16 autocast
+  over fp32 weights, batches of length-sorted chunks, a fixed number of epochs and one seed. The run records GPU use
+  and warns about slow step windows. Non-finite losses or gradients stop training before another optimizer update.
+- **What it writes.** After the last epoch C scores the owner's validation and test lines and Creayun's test_creayun
+  lines in fp32, as export does: `scores.parquet` and `creayun.parquet`, which `uv run eval` reads. Beside them the
+  model (`config.json`, `model.safetensors`, `tokenizer.json`), `train.json` (each epoch's loss, time and memory, the
+  GPU readings, the validation hold metric) and `input.json`: the run's description, `max_tokens` (which export and the
+  bundle cut C's input to), the base revision, the settings and what the run was made from.
+  C saves the model and `trained.json` before scoring. If scoring fails, run the same command again to finish from
+  the saved model. The run checks the data, settings, source code and each saved model file's size and SHA-256.
+  A changed or incomplete saved model is refused. Use `--force` only to replace that run and train again.
+  After each epoch, `epoch-<N>/` holds the model, optimizer, scheduler and random state, with file hashes in
+  `complete.json`. Run the same command to resume an interrupted training run from its last verified epoch.
+  The trainer preserves incomplete checkpoint files beside the completed epochs.
+- `--fold K` trains teacher fold K of `[train.c] folds` into `c-<N>-fold<K>/`: the Paper runs are dealt into folds with
+  `[train.c] fold_seed` (a run split between two batches is in one fold), and fold K's model trains on the owner's
+  selected training lines of the other folds and the selected kinds-only lines. It then scores, as SH's teacher,
+  only cascade-route train-split Paper lines of fold K (bf16, as the ranking scores) into `teacher.parquet`, and writes
+  the Paper runs it trained on to `trained-runs.json`; it refuses before training when a line it would score is of a
+  run it trains on. A teacher fold does not score validation or test lines. `--epochs E` and `--limit N` make a smoke
+  run (`-smoke`). `--limit` selects up to N training lines, divided between Paper and kinds-only rows when available,
+  and scores the first 2,000 lines of each scored set. `--force` trains again over a
+  finished run.
 
-Each of these records what it was made from: `subset.parquet.inputs.json` holds the fingerprints of `train.parquet`,
-`labels.parquet` and `messages.parquet`, a hash of the case-file texts it drops, the recipe, the base model and the
-prompt format; the checkpoints and `train_done.json` hold the subset's fingerprint and the training settings. When any
-of that changes, the subset is rebuilt and the run is trained again; `adapter/` and `train_done.json` are replaced when
-it finishes. If checkpoints exist from other settings, `train` stops and names the changed settings: delete `ckpt/` to
-train from the start, or restore the settings to continue.
+`uv run train sh --c <run>` trains SH, the student, into `<[train] out>/sh-<run>/`, after `<run>` (`c-<N>`) and its
+teacher folds (`c-<N>-fold<K>`). GPU, about 2 minutes an epoch.
 
-On a 32 GB card the 1.7B model takes about 52 minutes and the 4B about 2 hours (about 7,000 steps at 0.40 s and
-0.94 s).
-
-To compare base models and recipe changes, `uv run train --steps 2000 [--seed S] [--tag TAG] [--model NAME]` makes
-a bounded run: the same subset, the first steps of the epoch that hold 2,000 x 32 labelled lines, and warmup and
-cosine over those steps. The seed (default `[train] seed`) sets the batch order, the LoRA initialization and
-dropout. Each run has its own folder,
-`<work>/models/bounded/<model>[-<tag>]-s<seed>-n<steps>/`. Use a new `--tag` after changing the recipe to keep the
-earlier run: a folder whose recipe or inputs changed is trained again from the start.
+- **The model.** `models.py`'s SH (the module export loads) over the pinned e5-small copy, `[train.sh] layers` context
+  layers, the head's bias at each output's log-odds among the training lines.
+- **The lines.** Cascade-route train-split judged Paper lines, with the trainset's SH line ids and features, kinds and
+  hold label. Each unknown kind is out of its output's loss, `kmask` is out of the kind loss, and hold -1 is out of
+  the hold loss. Accepted forced-C rows can remain in context; SH does not learn their unused gate decisions.
+- **The teacher.** Each line's eight logits from the fold model of `<run>` that did not train on its run
+  (`teacher.parquet` of each fold). The step refuses a fold trained on other inputs, labels, lines or length than
+  `<run>`, a fold with different settings or coverage, a fold whose scored lines share a run with `trained-runs.json`,
+  and a cascade training line scored by no fold or by
+  two. `--teacher h` takes H instead (the models in `[train.sh] h`, at the length they were trained at, bf16, their mean;
+  cached in `<[train] out>/teacher-h.parquet`) into `sh-h/`, to check the folds' SH against an H-taught one.
+- **The recipe** (`[train.sh]`): the soft binary cross-entropy of SH's logits against the teacher's at `temperature`
+  (times its square) on all eight outputs, plus the hard one on the labels, divided by the number of terms; batches of
+  chunks of consecutive lines of one log file; AdamW with three learning rates (e5-small, the new layers, the head),
+  warm-up then linear decay over `epochs`; bf16 autocast.
+- **The epoch.** After each epoch SH scores covered validation lines in fp32. The epoch rule uses only cascade
+  validation lines: at the configured pass share, SH must pass as many as possible of the lines C holds at the
+  configured hold share. Forced-C rows already bypass that gate. Training stops `patience` epochs after the best.
+- **What it writes.** SH's model folder (`model.safetensors`, `meta.json`, e5-small's `config.json` and
+  `tokenizer.json`; `[export] sh` can name it), `scores.parquet` (dossier, id, period, `sh_<out>` of the kept epoch on
+  every validation and test line, fp32, as export scores), `train.json` (each epoch's loss, time, memory and
+  validation measure) and `input.json` (what the run is, which bundle.json `models.sh` carries, its teacher, epoch,
+  settings and what it was made from).
+  Every epoch has a verified model, optimizer, scheduler and random-state checkpoint. Run the same command to resume
+  interrupted training. After training, the job copies the selected epoch's model and scores every validation and test
+  key. Rejected rows have zero diagnostic logits and are identified by their coverage field; no model runs on them.
+  `--limit N` (N training lines drawn with seed 0) and `--max-steps N` (N steps an epoch, two epochs) make a smoke run
+  (`-smoke`). An explicitly limited C supplies its first 2,000 validation and test keys to a smoke SH's epoch rule.
+  A full C must supply every validation and test key. Smoke models cannot be exported or bundled.
 
 ## export
 
-Turns `<work>/models/<model>/adapter` into the GGUF that eval and the model host use. Each output records what it was
-made from (`<output>.inputs.json`: the fingerprints of its input files and llama.cpp tools, its settings and the
-prompt format). A stage whose output was made from the current inputs is skipped, so a rerun continues after the last
-finished stage; anything else is made again, along with what was made from it:
+Run `uv run export` to convert the completed C classifier into one OpenVINO graph. The export needs no SH model or
+SH tokenizer. It preserves the trained C input: raw preparation, model meaning, allowed links, complete-target
+checks, causal context, role names and token budget. Score every covered target with C. Reject an incomplete target
+before folding, context or judgment.
 
-1. `merged/`: merges the adapter into the base model. The margins on 64 val prompts must stay within
-   `merge_tolerance` of the margins recorded at the end of training.
-2. `gguf/`: the llama.cpp converter (`[paths] llama_src` in `data/local.toml`, a llama.cpp source checkout) writes
-   bf16.
-   `llama-imatrix` computes an importance matrix from 1,000 training-split prompts (`imatrix.txt`, never val); it
-   reads the file as one token stream in fixed 512-token chunks that run across prompt boundaries. `llama-quantize`
-   makes the `[export] deploy` type (Q5_K_M) with it and the token embedding, which is also the output head, at
-   Q8_0.
-3. `eval/parity-<deploy>.json`: llama-server's margins for the deployed GGUF, with the deployment's server settings,
-   against PyTorch's on 300 val prompts.
-4. `data/classifier.toml`: `[models.classifier] gguf` (the deployed GGUF) and the tokenizer of the base model the run
-   was trained on. It overrides `ecc.toml`, and `data/local.toml` overrides it. `uv run eval` then scores that GGUF and
-   adds the Platt parameters it fits on the GGUF's own val margins. Its P(ban) is calibrated on val's class balance
-   (about 5% ban), not on live chat, so it is a fixed scale for thresholds, which come from evaluation.
+Each C run has a slot at `<[export] out>/<C folder name>/`:
 
-Development scores on the GPU: `[eval] server` points at a CUDA build of the same llama.cpp release. llama.cpp's
-margins depend on the backend (CPU builds for different instruction sets differ by about 0.1-0.2 on average), so a
-small sample is checked once on a CPU build that matches the deployment CPU, such as llama.cpp's AVX2-only build for
-a Ryzen 5 3600X.
+1. `models/c.xml`, `c.bin` and `graphs.json`: fp32 weights, dynamic batch and sequence dimensions, and graph metadata.
+   The conversion checks real Torch outputs on several sequence lengths.
+2. `torch.parquet`: all eight C logits for every covered judged validation and test key. Rejected keys remain in the
+   table with absent logits. The selected immutable table supplies the full causal runs.
+3. `thresholds.json`: diagnostic `1pct` and `2pct` thresholds and a named `recall` threshold. Calibration uses validation
+   only. Recall is the minimum known covered hold-positive validation logit minus the allowed CPU logit error.
+   Kind thresholds are hints. They do not clear a hold. The file records exact model, table and hold-label sources.
+   It reports model-held, input-rejected and total traffic counts separately.
+4. `parity.json`: the actual CPU graph outputs against Torch on identical inputs, for all eight outputs and all named
+   thresholds. Run `--full` for all validation and test keys. Use `--sample N` to change the sample size or `--files N`
+   to select the first N files. Use `--no-parity` to skip this check. The default sample includes every covered target
+   near a threshold and a reproducible random sample.
 
-The 4B model's export took 33 minutes on the RTX 5090 machine, most of it the importance matrix (25 minutes with a CPU
-build of llama.cpp on 16 threads of a Ryzen 9 9950X3D); quantizing takes seconds.
-
-For a bounded run, `uv run export` with the run's train flags scores the adapter on the base model with PyTorch,
-without merging, on val, the case sets and the real log, summarized as `eval` does (val also on its rows whose text
-never appears in train), with a Platt fit on val (`platt-stream.json`). It writes the scores, `summary.md` and
-`metrics.json` to `eval/torch-stream/` in the run folder and rebuilds
-`<work>/models/bounded/table.md`, one row per bounded run. The table's tf column is
-recomputed from each run's tf scores with the current `known_offenders`: the players other than those offenders who
-trigger at the highest threshold that still triggers all of them. That threshold is picked on tf itself, so the count
-is in-sample. The step does not touch `data/classifier.toml`.
+Export and bundle refuse smoke runs, teacher folds, research models, missing hold-positive training evidence and
+changed model bytes. Completed training records must match the model files and training source. The saved C inputs
+must match the served token budget. Input, score and threshold records detect changed source data or input rules.
+Keep numerical proof fixtures separate from release artifacts.
 
 ## eval
 
-`uv run eval` scores a model on every set: the case-set folders in `[eval.sets]`, `attacks` (what a player controls
-in the classifier's input, built by `data/cases/attacks/`), `val`, and `tf` (every message of the current Total
-Freedom logs, which are never used for training). The classifier sees each message with the history
-its conversation's window would hold in the model host: val and tf messages replay their conversation from
-`messages.parquet`, case messages their case-file conversation. The classifier is scored by the llama.cpp library of
-the `[eval] server` build (`src/ecc/llama.py`, in its own process), one forward pass per conversation window: while a
-conversation's prompts each extend the previous one, every message's margin is read at the end of its own line,
-where the logits are those llama-server gives that message's prompt alone, with the same top-20 rule for an answer
-token llama-server would not list. Each window gets a 1,024-token sequence, a deployment slot, and `[eval] slots`
-windows share a decode. The margin is read from the exact ` ban` and ` ok` token ids. A prompted model is served by
-a llama-server that eval starts and stops. Scores go to
-`<work>/eval/<model>/<set>.jsonl` one message at a time, so a stopped or killed run continues where it stopped.
-`<set>.jsonl.inputs.json` records what they come from (the case files, or the ingest batches of `messages.parquet`
-and for val `val.parquet`; the GGUF, the llama.cpp build and its settings, the prompt format and tokenizer); when any
-of it changes, the set is scored again from the start. A newly ingested batch only adds messages, so the next run
-scores just those. `summary.md` is rebuilt from every set whose messages all have current scores (a partly scored
-set is listed with its unscored count): AUROC and PR-AUC, recall at val false-positive rates on
-all of val and on val rows whose text never appears in train, players caught by each window rule, and, on the real
-log, the players triggered per day, the known offenders caught, and the labelled offenders caught at the operating cut
-(the margin at val FPR 1%). The classifier's thresholds apply to its Platt
-P(ban), as in the model host.
+`uv run eval RUN [RUN ...]` measures runs on the owner's validation and test weeks and on Creayun's held-out lines,
+and writes `<[eval] out>/<run>[+<run>...]/tables.md` and `eval.json`. A run is a folder of scores, named under
+`[export] out` or `[train] out`, or given as a path (a name found under both is refused):
 
-`failures.md`, rebuilt with the summary, shows where the model fails:
-- on each case set, the innocent players that set the zero-innocent bar, every offender under it, and the bans missed
-  and other messages flagged at the operating cut;
-- on val, the highest-scoring ok rows and the lowest-scoring bans;
-- on the real log, the labelled offenders the cut misses and the other players it triggers.
+Each owner period must include scores for every judged line in its truth table. Evaluation refuses incomplete scores,
+including smoke runs. Export and bundle also refuse smoke models, teacher folds and unverified training records.
 
-Each message is shown with the last lines the model saw, their labels (with the labelling rule) and scores, and its
-own P(ban) in context and alone. A message that is high only in context was flagged for its conversation; one that is
-high alone was flagged for its own words.
+- a production run, the C export slot: `torch.parquet` and `thresholds.json`. The score and threshold provenance must
+  match. Each covered target uses its C hold logit at diagnostic or recall thresholds. Rejected targets are blocked
+  without a model decision. The report names the C folder.
+- a C run, a folder of `train c`: `scores.parquet` (dossier, id, period and C's eight logits, `c_<out>`, of every
+  judged validation and test line) and, when it scores them, `creayun.parquet` (the same of Creayun's test_creayun
+  lines). C alone holds a line when its hold logit reaches the score that holds each share of `[eval] holds` of the
+  run's own validation lines.
 
-`--model baseline` scores the prompted Qwen3-4B for comparison. `--set` picks sets;
-`--set train` scores the labelled training rows of 2,000 random windows (`[review] sample_windows`) for `review`.
-`--set outside` scores every message outside every window, of every source; they count as ok only because no risk
-term opened a window, so the summary lists how many reach each threshold, by source. A
-full run takes about 10 minutes on the RTX 5090.
+The report shows each run after the first beside its difference from the first, paired on the same resamples.
+List the production run first to compare with it. Use `--labels` to select a label set. By default, measure each
+set whose files exist. The `forward` set uses the frozen labels and ban timing from `[eval] forward`. The `new` set
+uses the hold labels in each `[eval] batches` folder and derives supported ban timing from the configured rulings
+and saved reads. Evaluation checks that the resolved keys, hold labels and sitting fields match `hold.parquet`.
+The batches' `truth.parquet` supplies the splits, kinds, kind masks and line order.
 
-## review
+Every run must score the complete judged key set for the requested periods. Evaluation refuses partial score tables,
+even when their filenames match a full run. A `coverage` field distinguishes model scores from rejected targets.
 
-Reads a model's scores on labelled training rows (`uv run eval --model <model> --set train` makes them) and finds the
-labelled lines the model strongly disagrees with (confident learning). Only training rows are queued, so relabelling
-never moves val or tf toward the model. They go to `<work>/review/queue.txt`. To fix a label, write `ban`, `ok` or `amb`
-after `fix:` and run `uv run review` again. The fix moves to `data/corrections.jsonl`. `uv run merge` applies it.
+The report separates input rejections, model holds and total blocks. It gives model recall on all positive lines and
+on covered positive lines, plus total blocked recall. A target blocked before scoring is never counted as a model
+detection. The other measures, per period and threshold: blocked recall of the hold = 1 lines (all, in owner-ruled sittings, by kind), the
+share of lines held, hold = 0 lines held per 1,000, the marked hold = 0 lines held, clean sittings of
+20 or more lines with a line (and with 5 lines) held, the owner's ban, hold, nothing and not-ban sittings with a line
+held, and his ban sittings whose ban line, or a line by it, is held. On Creayun's held-out lines, for runs that score
+them: each kind's lines over the hold thresholds and over the kind's own output at the score that flags `[eval]
+kind_share` of the owner's covered validation lines, and the unmasked all-zero lines over each. Creayun tables show
+total blocks and model holds separately; each kind's own-output table uses covered lines only. Beside them, the hold labels of
+the training period's lines with each kind at 1. Intervals are 95% over `[eval] resamples` resamples of the log files
+(Creayun: of its dossiers), seeded with `[eval] seed`, thresholds fixed.
 
-## redteam
-
-Runs the slow check as ECC-Server runs it on the `[redteam.sets]` case-set folders: Kimi K3 on Bedrock with
-datamarked transcripts and code-verified quotes, roles and clearing, and the fine-tuned classifier
-(`[redteam] fast_model`, its case-set scores from `eval`) as the fast layer. The thresholds are the deployed ones in
-`data/decision.toml` (`--trigger`, `--clearing` and `--corroboration` try others). A player triggers at their first
-message with P(ban) at or above the trigger; a conversation where nobody triggers gets no Kimi call. A triggered
-player is cleared only with no verified quote and every earlier message below `clearing`. A player who never
-triggered, in a conversation where someone did, is banned only with corroboration: a verified quote tagged starting,
-directed, pushing or grooming, and at least one of their quoted messages at or above `corroboration`. Every message
-of the sets being run needs a current `eval` score. Writes
-`data/redteam/<tag>.report.md`, counting offenders cleared, innocents banned and so on. Every Kimi answer is cached in
-`<tag>.calls.jsonl`, so a rerun pays only for missing calls. `--cached` never contacts Bedrock.
+`--validation` reports the validation weeks only: every choice between runs (such as C's length) is made there, and
+the test weeks are reported once, after it. A run takes seconds, on the CPU.
 
 ## bundle
 
-`uv run bundle` writes the classifier bundle the model host serves to `<work>/bundles/<run>-<GGUF SHA-256
-prefix>-<content hash>/`: `model.gguf`, `bundle.json` (Platt parameters, prompt format and window bounds, the trigger,
-clearing and corroboration thresholds from `data/decision.toml`, the slow check's system prompt, the pinned llama.cpp
-release and llama-server's deployment arguments) and `manifest.json` with each file's SHA-256. It needs the Platt
-parameters `eval` fits. It then uploads the folder to the private W&B project in `[wandb]` as a version of the bundle
-artifact, aliased with the bundle version (`--local` skips the upload).
+Run `uv run bundle --no-upload` to build and check the C-only bundle in `<work>/bundles/<version>/`. The build reads
+calibrated thresholds from the C export slot. It keeps the owner's private threshold file and old README template
+unchanged. It preserves the private judge settings and texts.
+
+Before creating or reusing a bundle, the build checks the required accounts in private `[eval] known_offenders`.
+Each account must have judged owner-positive hold targets in the selected export batch.
+Every such target must be covered and pass the real C CPU graph at the fixed calibrated recall threshold.
+Missing bindings, rejected inputs, nonfinite logits or missed positives block the build and its upload workflow.
+Read the private result in the export slot's `known-offenders.json`.
+
+- `models/`: only `c.xml`, `c.bin` and `c_tokenizer.json`.
+- `bundle.json`: `scoring.mode=c_only`, graph and tokenizer hashes, the eight ordered outputs, kind hints, exact
+  preparation and input rules, their hash, validation thresholds and provenance. Use `recall` by default.
+- `judge/question.md` and `judge/examples.json`: the current private judge texts and owner rulings.
+- `README.md`: the C-only artifact instructions. `manifest.json` records every other file's SHA-256 and size.
+
+The version includes a hash of the content. The build copies files into unique staging, checks their bytes and
+preserves independent owned copies. The reference loader checks the explicit contract, input-rule hash, output
+order and model-file hashes. Old cascade bundles fail the C-only contract.
+
+The sibling `<version>-vectors/` folder contains real private wire records, folded copies, preparation examples and
+expected outputs. The checks compare exact C token ids and contexts with the training builder. They compare the real
+CPU graph outputs with Torch and check all named threshold decisions. Run the independent scorer with
+`uv run python -m ecc.reference BUNDLE IN.jsonl OUT.jsonl`.
+
+Without `--no-upload`, the command uploads the verified bundle to the private W&B artifact project. A separate
+promotion selects the served version.
+
+## replay-export
+
+`uv run replay-export` writes the test weeks as `ecc-server replay` reads them, into `[replay] out` (chat text, in the
+work folder only), to measure a bundle's models and judge together before it ships:
+
+- `lines.jsonl`: every run of `[export] batch` that holds a test file, as one stream each: the join and leave lines of
+  its log files as `presence` events, and every line as the plugin sends it, prepared and raw, each copy the dossier
+  folded into a line sent as a line of its own (`copy_of`). A line's player is its resolved account, so a player who
+  shows several names is one player. A judged line of a test file carries its sitting, the verdict and kind marks of
+  the torch scores in the export slot of `[export] c` at the thresholds `export` set there (`hold` when C reaches the validation recall threshold); the owner's own sittings (`[replay] owner`) are trusted; every
+  other line is context only. The step stops when a judged test line has no torch score, or when the slot's
+  thresholds were set from another C model or different score inputs.
+- `judge/`: a `-fold` folder: the question with its added sentence, the answer format, and the owner's ruled cases
+  dated before `[periods] test_from` with his rulings (`data/v4/judge/`, `[bundle] rulings`), no saved answers.
 
 ## promote
 
-`uv run promote [version]` moves the W&B `production` alias to an uploaded bundle (default: the one `bundle` builds
-from the current configuration). That is the whole deployment: every ECC-Server picks the new bundle up at its next
-check or at `ecc-server update`, verifies it and swaps it in. Promoting an earlier version rolls back the same way.
+`uv run promote [version]` moves the W&B `production` alias to an uploaded bundle (default: the one `bundle` built
+last). That is the whole deployment: every ECC-Server picks the new bundle up at its next check or at
+`ecc-server update`, verifies it and swaps it in. Promoting an earlier version rolls back the same way.
 
 ## backup
 
 `uv run backup` copies the whole `data/` folder to the private `ecc-data` raw repository on Telesphorepo
-(`telesphorepo.toml`): one gzipped tar per folder in it, one for the files directly in it, and `manifest.json` with
-each file's SHA-256, size and modification time. The work folder and `.env` are never included. The repository keeps
-one file per path and a publish replaces it, so each backup goes to its own `backups/<UTC time>/` folder, uploaded
-with `--if-new` so no backup is ever written over; `latest.txt` names the newest. Run it after every change to
-`data/`. `--dry-run` builds the archives in `<work>/backup-out/` without publishing.
+(`telesphorepo.toml`) as gzipped tars and `manifest.json` with each file's SHA-256, size and modification time. A
+folder of at most 64 MiB is one tar; a larger one is split into its subfolders by the same rule, one tar per file over
+64 MiB, and one for its other files, so a change uploads only the tar that holds it. The work folder and `.env` are
+never included. The repository keeps one file per path and a publish replaces it, so each backup goes to its own
+`backups/<UTC time>/` folder, uploaded with `--if-new` so no backup is ever written over; `latest.txt` names the
+newest and is published last.
 
-`uv run restore` brings the newest backup back (`--backup backups/<UTC time>` for another one). It needs a read token
-of `ecc-data` as `TELESPHOREPO_USER` and `TELESPHOREPO_READ_TOKEN` in `.env`. It checks every bundle and file
-against the manifest, writes only missing files, and stops without writing when a file in `data/` differs. Restored
-files get their recorded modification times, so every step that was current at the backup is current again.
-`uv run restore --check` downloads and verifies a backup and compares it with `data/` without writing anything.
+Archives are built deterministically, so unchanged files give the same bytes, and an archive whose SHA-256 equals
+its entry in the manifest `latest.txt` names is not uploaded again: the new manifest names the backup folder that
+holds its bytes. Each manifest still restores the whole `data/` folder, so a backup folder stays on the server while a
+later manifest names it. A backup of an unchanged `data/` uploads only its manifest and `latest.txt`; `--full`
+uploads every archive.
+
+An archive over 256 MiB goes up in parts of 256 MiB (`<archive>.000`, `.001`, ...), one publish each, listed in the
+manifest with their SHA-256: a publish session ends 15 minutes after it starts (the server's `publish.session_ttl`)
+and one upload may not exceed 2 GiB (`max_upload_size`), so a large archive in one publish fails with "Unauthorized:
+publishing needs a publish session". Every line telesphorepo prints goes to the backup's log. Run it after every
+change to `data/`. `--dry-run` builds the archives and the manifest in `<work>/backup-out/` and logs what it would
+upload, without publishing.
+
+`uv run restore` brings the newest backup back (`--backup backups/<UTC time>` for another one). It downloads with
+`telesphorepo get`, as the account this computer is logged in as, each archive from the backup folder its manifest
+entry names. It joins an archive's parts, checking each, checks every archive and file against the manifest, writes
+only missing files, and stops without writing when a file in `data/` differs. Restored files get their recorded
+modification times, so every step that was current at the backup is current again. `uv run restore --check`
+downloads and verifies every archive the manifest names, wherever its bytes are, and compares it with `data/` without
+writing anything.
 
 ## Deploying
 
-ECC-Server (github.com/plexusorg/ECC-Server) serves the bundle `promote` made production, beside `llama-server` on the
-game host's CPU, and makes every chat-safety decision: the trigger, the slow check on Bedrock and the verdicts.
-Module-ECC, the Plex module, sends it each message and carries out its mutes and bans; ECC-Server's README documents
-the protocol between them. ECC-Server builds each conversation's growing prompt exactly as `chat.py` does and
-sends it to llama-server with `cache_prompt`, so the server's prefix cache needs the bundle's llama-server settings
-(`-np 4 -c 4096 --slot-prompt-similarity 0.5 --cache-ram 1024 --no-cache-idle-slots`), the settings `export`'s
-parity check runs.
+ECC-Server (github.com/plexusorg/ECC-Server) serves the bundle that `promote` selects. It runs one C graph
+in-process on the game host's CPU and uses the bundle's question and cases when it calls the judge.
+Module-ECC, the Plex module, asks for a verdict on each line before delivery and carries out the ruling.
+ECC-Server's README documents the protocol.

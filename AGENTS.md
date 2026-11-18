@@ -11,7 +11,7 @@ public (github.com/plexusorg/ECC-ML); its data, policy and model are private.
   and `data/local.toml`. It is gitignored and backed up whole by `uv run backup`; run the backup after every change to
   it.
 - The work folder (`[paths] work` in `data/local.toml`, outside the repository) is the scratch space: everything the
-  pipeline rebuilds (models, bundles, eval scores, the train and val tables, the review queue, logs, tools),
+  pipeline rebuilds (models, bundles, eval scores, the train and val tables, logs, tools),
   experiments, and notes in `notes/`. Nothing in it is backed up. Delete an experiment when it ends, and a note when
   its work is done.
 - A model ships through W&B: `uv run bundle` uploads it, `uv run promote` makes it the one ECC-Server serves. A model on

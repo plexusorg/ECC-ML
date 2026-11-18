@@ -1,7 +1,8 @@
-"""Configuration, logging, progress bars, step state and crash-safe file writes shared by every step."""
+"""Configuration, logging, progress bars, what each output was made from, and crash-safe file writes shared by every
+step."""
 import json
+import hashlib
 import logging
-import math
 import os
 import signal
 import sys
@@ -22,12 +23,11 @@ log = logging.getLogger("ecc")
 
 
 class Config:
-    """ecc.toml in the repository, overlaid by <data>/classifier.toml (written by `export`), then <data>/decision.toml
-    (the private decision thresholds), then <data>/local.toml (this machine's paths and private settings).
+    """ecc.toml in the repository, overlaid by <data>/local.toml (this machine's paths and private settings).
 
     data is the private folder: everything the pipeline cannot rebuild, all of it backed up. work ([paths] work in
     local.toml, outside the repository) holds what the pipeline rebuilds: models, bundles, eval scores, the train and
-    val tables, the review queue, logs and tools. Nothing in work is backed up. The environment variables ECC_CONFIG
+    val tables, logs and tools. Nothing in work is backed up. The environment variables ECC_CONFIG
     and ECC_DATA name another config file and data folder, to run the steps against a copy."""
 
     def __init__(self):
@@ -35,9 +35,9 @@ class Config:
         self.file = path
         self.raw = tomllib.loads(path.read_text(encoding="utf-8"))
         self.data = self._abs(os.environ.get("ECC_DATA") or self.raw["data"], path.parent)
-        for overlay in (self.data / "classifier.toml", self.data / "decision.toml", self.data / "local.toml"):
-            if overlay.exists():
-                _merge(self.raw, tomllib.loads(overlay.read_text(encoding="utf-8")))
+        local = self.data / "local.toml"
+        if local.exists():
+            _merge(self.raw, tomllib.loads(local.read_text(encoding="utf-8")))
         self.paths = {k: str(v) for k, v in self.raw.get("paths", {}).items()}
         if "work" not in self.paths:
             raise SystemExit(f"set [paths] work, a folder outside the repository, in {self.data / 'local.toml'}")
@@ -76,6 +76,9 @@ def _merge(base, over):
 
 def run(name, body, parser=None):
     """Entry point wrapper: parse flags, log to the console and to <work>/logs, stop cleanly on Ctrl+C."""
+    for stream in (sys.stdout, sys.stderr):
+        if hasattr(stream, "reconfigure"):
+            stream.reconfigure(encoding="utf-8")
     args = parser.parse_args() if parser else None
     cfg = Config()
     logs = cfg.work / "logs"
@@ -158,6 +161,15 @@ def fingerprint(path):
     return [len(files), sum(s.st_size for s in files), max((s.st_mtime_ns for s in files), default=0)]
 
 
+def source_hash(*names):
+    """Hash pipeline source files so cached outputs expire when their builder changes."""
+    h = hashlib.sha256()
+    for name in sorted(names):
+        h.update(name.encode("utf-8") + b"\0")
+        h.update(Path(__file__).with_name(name + ".py").read_bytes())
+    return h.hexdigest()
+
+
 def _made_from_path(output):
     output = Path(output)
     return output.with_name(output.name + ".inputs.json")
@@ -169,28 +181,9 @@ def made_from(output):
     return json.loads(p.read_text(encoding="utf-8")) if p.exists() else None
 
 
-# The inputs key of messages.parquet: ingest's batch list (message_batches). Ingest only appends, and a message's
-# prompt holds only earlier lines of its conversation, so appending never changes an existing message's prompt. A
-# recorded batch list that is a prefix of the current one therefore still matches; the new rows are scored by the
-# resume. A rebuilt messages.parquet starts a new batch list, which matches nothing recorded before.
-MESSAGES = "messages"
-
-
-def message_batches(cfg):
-    """What messages.parquet holds: ingest's batch list."""
-    return (load_state(cfg, "ingest") or {}).get("batches", [])
-
-
-def _same(key, was, now):
-    if key == MESSAGES and isinstance(was, list) and isinstance(now, list):
-        return now[:len(was)] == was
-    return was == now
-
-
 def is_current(output, inputs):
-    """Whether `output` exists and was made from these inputs: a dict of fingerprints, settings and code constants,
-    equal except that a recorded MESSAGES batch list may be a prefix of the current one. A stage that skips its work
-    because its output exists must ask this instead."""
+    """Whether `output` exists and was made from these inputs: a dict of fingerprints, settings and code constants. A
+    stage that skips its work because its output exists must ask this instead."""
     return Path(output).exists() and not changed_keys(output, inputs)
 
 
@@ -204,34 +197,7 @@ def changed_keys(output, inputs):
     was, now = made_from(output), json.loads(json.dumps(inputs))
     if was is None:
         return sorted(now)
-    return sorted(k for k in set(was) | set(now) if k not in was or k not in now or not _same(k, was[k], now[k]))
-
-
-def state_path(cfg, step):
-    return cfg.data / "state" / f"{step}.json"
-
-
-def load_state(cfg, step):
-    p = state_path(cfg, step)
-    return json.loads(p.read_text(encoding="utf-8")) if p.exists() else None
-
-
-def save_state(cfg, step, inputs=(), **info):
-    """Record a finished step: fingerprints of its inputs (for staleness) and whatever counts status shows."""
-    state = {"finished": datetime.now().isoformat(timespec="seconds"),
-             "inputs": {str(Path(p).relative_to(cfg.data) if Path(p).is_relative_to(cfg.data) else p): fingerprint(p)
-                        for p in inputs}, **info}
-    write_text(state_path(cfg, step), json.dumps(state, indent=1))
-    return state
-
-
-def changed_inputs(cfg, state):
-    out = []
-    for p, fp in (state or {}).get("inputs", {}).items():
-        full = Path(p) if Path(p).is_absolute() else cfg.data / p
-        if fingerprint(full) != fp:
-            out.append(p)
-    return out
+    return sorted(k for k in set(was) | set(now) if k not in was or k not in now or was[k] != now[k])
 
 
 # ---------------------------------------------------------------- crash-safe files
@@ -251,49 +217,3 @@ def write_parquet(table, path):
     tmp = path.with_name(path.name + ".tmp")
     pq.write_table(table, tmp, compression="zstd")
     os.replace(tmp, path)
-
-
-def read_jsonl(path, repair=False):
-    """Records of a JSONL file. With repair, a half-written last line (killed process) is dropped from the file."""
-    path = Path(path)
-    if not path.exists():
-        return []
-    out, good, bad = [], [], 0
-    with open(path, encoding="utf-8") as f:
-        for line in f:
-            if not line.strip():
-                continue
-            try:
-                out.append(json.loads(line))
-                good.append(line if line.endswith("\n") else line + "\n")
-            except json.JSONDecodeError:
-                bad += 1
-    if repair and (bad or (good and not path.read_bytes().endswith(b"\n"))):
-        write_text(path, "".join(good))
-        log.info("%s: dropped %d incomplete line(s) left by an interrupted run", path.name, bad)
-    return out
-
-
-class JsonlAppender:
-    """Appends records and flushes each one, so a crash loses at most the line being written."""
-
-    def __init__(self, path):
-        Path(path).parent.mkdir(parents=True, exist_ok=True)
-        self.f = open(path, "a", encoding="utf-8")
-
-    def write(self, obj):
-        self.f.write(json.dumps(obj, ensure_ascii=False) + "\n")
-        self.f.flush()
-
-    def close(self):
-        self.f.close()
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        self.close()
-
-
-def sigmoid(x):
-    return 1 / (1 + math.exp(-max(min(x, 60), -60)))

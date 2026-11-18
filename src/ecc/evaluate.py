@@ -1,818 +1,651 @@
-"""uv run eval [--model NAME] [--set NAME ...]: score a fast-check model on every evaluation set and summarize.
+"""uv run eval RUN [RUN ...]: the measures of one or more runs on the owner's validation and test weeks and on
+Creayun's held-out lines, with intervals over resamples of the log files; each run after the first beside its
+difference from the first.
 
-Sets: the case files in [eval.sets], "val" (<work>/training/val.parquet) and "tf" (every message of the current Total Freedom
-logs, never trained on). "train" (labelled training rows of `[review] sample_windows` random windows, for `uv run
-review`) and "outside" (every messages.parquet row outside every window of data/windows.jsonl, of every source: ok
-only because no risk term opened a window) are scored only when named with --set. Scores are appended to <work>/eval/<model>/<set>.jsonl one message at a
-time, so a stopped or killed run continues where it stopped. <set>.jsonl.inputs.json records what the margins come
-from (the case files, or messages.parquet's ingest batches and for val val.parquet; the GGUF, the llama.cpp build and
-its settings, the prompt format and tokenizer, or a chat model's prompt file); a set whose record differs is
-scored again from the start. Batches ingested since only add messages, which the resume scores. Case-file messages
-are keyed by conversation, text and occurrence, messages.parquet rows by row number.
-A classifier sees each message with the earlier lines its conversation's streaming window holds (chat.WINDOW_MIN),
-counted with its [models.classifier] tokenizer; val, train, tf and outside messages take their conversation from
-messages.parquet, case messages from their case-file conversation. Its margins come from the [eval] server build's
-llama.cpp library (ecc.llama), one forward pass per window, and equal llama-server's for each message alone up to
-batching's rounding. A chat model is served by a local llama-server started for the run.
-Summary: <work>/eval/<model>/summary.md, rebuilt from every set whose scores are current and cover every message of the
-set (a partly scored set is named with its unscored count instead) (per-message AUROC/PR-AUC and
-player rules on case sets; on val also recall at val FPRs, on all of val and on val rows whose text never appears in
-train; triggered players, known offenders and triggers per day on the real log, and its labelled offenders caught at
-the operating cut, the margin at val FPR 1%; on outside the messages at each threshold, by source). <work>/eval/<model>/
-failures.md is rebuilt with it (ecc.failures). Once the classifier's val is fully
-scored, eval fits Platt scaling on those margins and writes it to data/classifier.toml's [models.classifier] platt. A
-model with Platt parameters is thresholded on sigmoid(a * margin + b), as the model host does; other models on
-sigmoid(margin).
+A run is a folder of scores, named under [export] out (a system run) or [train] out (a C run), or given as a path (a
+name found in both is refused):
+- a system run, `export`'s folder of one C run: torch.parquet (dossier, id, period, c_<out> of every judged
+  validation and test line) and thresholds.json (hold_recall, hold_1pct, hold_2pct), refused unless thresholds.json was
+  set from that torch.parquet (the fingerprints both record). A line is held at a level when C's hold
+  logit reaches the level's threshold, as ECC-Server decides. Its levels are diagnostic 1%, diagnostic 2%, and recall.
+- a C run, a folder of `train c`: scores.parquet (dossier, id, period, c_<out> of every judged validation and test
+  line) and, when it has them, creayun.parquet (dossier, id, c_<out> of Creayun's test_creayun lines). C alone holds a
+  line when its hold logit reaches the score that holds each share of [eval] holds of the run's own validation lines.
+
+The labels. A label set gives each judged line a hold label (1 hold, 0 not held, -1 unknown), its sitting and the
+sitting's ruling and source. "forward" uses the frozen labels and ban timing from [eval] forward, with table names
+mapped to batches by [eval] forward_batches. "new" reads hold.parquet in each [eval] batches folder and resolves ban
+timing from the configured rulings and saved reads. It checks that the keys, hold labels and sitting fields still
+match the saved labels. The split, kinds, masks and line order come from each batch's truth.parquet. Measure each
+label set whose files exist, or name them with --labels. A scored line without a label counts only in the shares of
+lines held and passed.
+
+Measures per period (validation, test) and level, each a ratio of counts summed over the period's log files: recall of
+the hold = 1 lines, of those in owner-ruled sittings and of those with each kind at 1; the share of lines held (and,
+for a production run, scored by C); hold = 0 lines held per 1,000; the share of the marked hold = 0 lines held; active
+clean players touched (clean sittings of 20 or more lines with 1 or more, and 5 or more, lines held); the owner's ban,
+hold, nothing and not-ban sittings with a line held; and of his ban sittings with a ban line, those whose ban line is
+held and those with a line held by it. Creayun's held-out lines (no hold label; every one a line its own filter
+flagged), for runs that score them: the share of each kind's lines, of the lines with any kind and of the unmasked
+all-zero lines over each hold level's threshold, and over each kind's own output at the score that flags [eval]
+kind_share of the owner's validation lines. Beside them, per label set, the hold labels of the training period's lines
+with each kind at 1.
+
+Intervals: 95% over [eval] resamples resamples of the period's log files (Creayun: its dossiers, one server on one
+day), drawn from [eval] seed, thresholds fixed. A difference between runs is paired on the same resamples; * marks one
+whose interval excludes 0.
+
+--validation reports the validation weeks only: every choice is made on them, and the test weeks are reported once,
+after it. Writes <[eval] out>/<run>[+<run>...]/tables.md and eval.json. CPU only, under a minute.
 """
 import argparse
-import bisect
-import hashlib
 import json
-import math
-import re
-import subprocess
-import sys
-import threading
-import time
-import urllib.error
-import urllib.request
-from collections import Counter, defaultdict
-
-import pyarrow.parquet as pq
-
-from .chat import CHANNEL_NAMES, PROMPT_FORMAT, WINDOW_MAX, fitted_prompt, load_cases, window_sizes
-from .core import (MESSAGES, JsonlAppender, changed_keys, fingerprint, is_current, log, message_batches, progress,
-                   read_jsonl, record_inputs, run, sigmoid, write_text)
-from .llama import TOP_LOGPROBS
-
-FPRS = (0.001, 0.005, 0.01)
-# llama-server settings per model kind. A classifier gets the model host's deployment settings (bundle.SERVER_ARGS)
-# except the slot count, [eval] slots slots of the deployment's 1,024 tokens each. Every layer goes to the GPU when the
-# configured build has one (a CPU build ignores -ngl).
-SLOT_TOKENS = 1024
-# llama.cpp's physical batch when eval scores classifier windows (on the RTX 5090, 512 is 13% slower, 4096 no faster)
-WINDOW_UBATCH = 2048
-
-
-def server_args(cfg, kind):
-    if kind == "chat":
-        return ["-np", "1", "-c", "8192", "--jinja", "-ngl", "999"]
-    slots = cfg["eval"]["slots"]
-    return ["-np", str(slots), "-c", str(SLOT_TOKENS * slots), "--slot-prompt-similarity", "0.5", "--cache-ram", "1024",
-            "--no-cache-idle-slots", "-ngl", "999"]
-
-
-def window_settings(cfg):
-    """The llama.cpp context eval scores classifier windows in (ecc.llama): [eval] slots windows per decode, each in a
-    sequence of the deployment's SLOT_TOKENS tokens, so eval rejects a prompt the deployment would."""
-    return {"seqs": cfg["eval"]["slots"], "seq_tokens": SLOT_TOKENS, "ubatch": WINDOW_UBATCH}
-
-
-# ---------------------------------------------------------------- llama-server
-
-class Server:
-    def __init__(self, cfg, gguf, log_path, kind="classifier"):
-        e = cfg["eval"]
-        port = e["port"]
-        self.url = f"http://127.0.0.1:{port}"
-        self.args = [str(cfg.path(e["server"])), "-m", str(gguf), "--port", str(port), "-t", str(e["threads"]),
-                     "--no-webui", *server_args(cfg, kind)]
-        self.log_path = log_path
-
-    def __enter__(self):
-        self.logf = open(self.log_path, "w", encoding="utf-8")
-        self.proc = subprocess.Popen(self.args, stdout=self.logf, stderr=subprocess.STDOUT)
-        start = time.time()
-        while time.time() - start < 900:
-            if self.proc.poll() is not None:
-                raise RuntimeError(f"llama-server exited with {self.proc.returncode}; see {self.log_path}")
-            try:
-                with urllib.request.urlopen(self.url + "/health", timeout=2) as r:
-                    if r.status == 200:
-                        return self
-            except (urllib.error.URLError, ConnectionError, TimeoutError):
-                pass
-            time.sleep(0.5)
-        self.__exit__()
-        raise RuntimeError("llama-server did not become ready")
-
-    def __exit__(self, *exc):
-        self.proc.terminate()
-        try:
-            self.proc.wait(timeout=20)
-        except subprocess.TimeoutExpired:
-            self.proc.kill()
-        self.logf.close()
-
-    def post(self, path, body):
-        req = urllib.request.Request(self.url + path, data=json.dumps(body).encode(),
-                                     headers={"Content-Type": "application/json"})
-        t0 = time.perf_counter()
-        with urllib.request.urlopen(req, timeout=600) as r:
-            data = json.loads(r.read())
-        return data, (time.perf_counter() - t0) * 1000
-
-    def answer_ids(self):
-        """The token ids of the classifier's answers (" ban", " ok") in the served model's vocabulary."""
-        ids = [self.post("/tokenize", {"content": a})[0]["tokens"] for a in (" ban", " ok")]
-        if not all(len(i) == 1 for i in ids):
-            raise SystemExit(f"the answers are not single tokens in this model: {ids}")
-        return ids[0][0], ids[1][0]
-
-
-def server_inputs(cfg, kind):
-    """What llama-server's margins depend on besides the model: its binary and settings (the thread count changes
-    only the speed)."""
-    return {"server": fingerprint(cfg.path(cfg["eval"]["server"])), "server_args": server_args(cfg, kind)}
-
-
-def ban_margin(positions):
-    """A prompted chat model's log P(ban) - log P(ok): the first position whose top alternatives include a token that
-    starts the word "ban" or "ok" (its text can be split or spaced in any way). A word missing from the top
-    alternatives is bounded by the lowest listed logprob, so the margin stays finite and keeps ranking where
-    probabilities saturate."""
-    for pos in positions:
-        alts = pos.get("top_logprobs", [])
-        best = {}
-        for alt in alts:
-            tok = alt["token"].strip().lower()
-            for w in ("ban", "ok"):
-                if tok and w.startswith(tok):
-                    best[w] = max(best.get(w, -1e9), alt["logprob"])
-        if best:
-            floor = min(alt["logprob"] for alt in alts) if alts else -30.0
-            return best.get("ban", floor) - best.get("ok", floor)
-    return None
-
-
-def word_probs(positions):
-    for pos in positions:
-        acc = {"ban": 0.0, "mute": 0.0, "ok": 0.0}
-        for alt in pos.get("top_logprobs", []):
-            tok = alt["token"].strip().lower()
-            for w in acc:
-                if tok and w.startswith(tok):
-                    acc[w] += math.exp(alt["logprob"])
-        total = sum(acc.values())
-        if total > 0.5:
-            return {w: p / total for w, p in acc.items()}
-    return {}
-
-
-def sections(text):
-    parts, current = {}, None
-    for line in text.splitlines(keepends=True):
-        m = re.match(r"###\s*(system|user)\s*$", line.strip())
-        if m:
-            current = m.group(1)
-            parts[current] = ""
-        elif current:
-            parts[current] += line
-    return {k: v.strip() for k, v in parts.items()}
-
-
-def classifier_margin(server, prompt, ids):
-    """(margin, milliseconds) of a classifier prompt, scored as the model host scores it: log P(" ban") - log P(" ok")
-    of the exact answer token ids (Server.answer_ids) at the one predicted position. llama-server lists only the top
-    TOP_LOGPROBS tokens. An answer token missing from them gets the lowest listed logprob, an upper bound on its own,
-    so the margin stays finite and is at most as extreme as the truth; with neither answer listed the margin is None
-    (an error row). ecc.llama.margin applies the same rule to full logits."""
-    data, ms = server.post("/completion", {"prompt": prompt, "n_predict": 1, "temperature": 0,
-                                           "n_probs": TOP_LOGPROBS, "cache_prompt": True})
-    alts = data["completion_probabilities"][0]["top_logprobs"]
-    got = {a["id"]: a["logprob"] for a in alts}
-    ban, ok = ids
-    if ban not in got and ok not in got:
-        return None, ms
-    floor = min(got.values())
-    return got.get(ban, floor) - got.get(ok, floor), ms
-
-
-def window_scores(cfg, gguf, count_tokens, log_path, convs):
-    """Yields (key, item, result record with "margin") of conversations [[(key, item), ...], ...], each message with
-    its streaming window's history (items_of with count_tokens), scored by an ecc.llama process that logs to
-    log_path."""
-    settings = {"build": str(cfg.path(cfg["eval"]["server"]).parent), "gguf": str(gguf), **window_settings(cfg),
-                "threads": cfg["eval"]["threads"]}
-    items = {k: it for conv in convs for k, it in conv}
-    with open(log_path, "w", encoding="utf-8") as logf:
-        proc = subprocess.Popen([sys.executable, "-m", "ecc.llama", json.dumps(settings)], stdin=subprocess.PIPE,
-                                stdout=subprocess.PIPE, stderr=logf, encoding="utf-8")
-        failed = []
-
-        def feed():
-            # its own thread, so the pipe to the scorer never fills while its results wait to be read
-            try:
-                for conv in convs:
-                    proc.stdin.write(json.dumps([[k, fitted_prompt(it["history"], it["speaker"], it["text"],
-                                                                   count_tokens)] for k, it in conv]) + "\n")
-            except Exception as e:
-                failed.append(e)
-            finally:
-                try:
-                    proc.stdin.close()
-                except OSError:
-                    pass
-
-        feeder = threading.Thread(target=feed, daemon=True)
-        feeder.start()
-        finished = False
-        try:
-            for line in proc.stdout:
-                k, margin = json.loads(line)
-                yield k, items[k], {"margin": margin}
-            finished = True
-        finally:
-            if not finished:
-                proc.kill()
-            proc.wait()
-            feeder.join()
-    if proc.returncode:
-        raise RuntimeError(f"the llama.cpp scorer exited with {proc.returncode}; see {log_path}")
-    if failed:
-        raise failed[0]
-
-
-class Scorer:
-    """A chat model: one message (history, speaker, text, channel) -> result record with "margin", the message seen
-    with its last [models.<name>] history lines."""
-
-    def __init__(self, cfg, spec, server):
-        self.server = server
-        self.n = spec["history"]
-        self.sec = sections(cfg.path(spec["prompt"]).read_text(encoding="utf-8"))
-
-    def __call__(self, history, speaker, text, channel):
-        hist = list(history)[-self.n:] if self.n > 0 else []
-        f = {"history": "\n".join(f"{s}: {t}" for s, t in hist) or "(none)", "speaker": speaker, "text": text,
-             "channel": CHANNEL_NAMES[channel]}
-        messages = ([{"role": "system", "content": self.sec["system"].format(**f)}] if self.sec.get("system") else [])
-        messages.append({"role": "user", "content": self.sec["user"].format(**f)})
-        data, ms = self.server.post("/v1/chat/completions", {"messages": messages, "temperature": 0, "logprobs": True,
-                                                             "top_logprobs": 20, "max_tokens": 8})
-        choice = data["choices"][0]
-        positions = (choice.get("logprobs") or {}).get("content", [])
-        probs = word_probs(positions)
-        return {"verdict": max(probs, key=probs.get) if probs else "error", "p_ban": probs.get("ban"),
-                "margin": ban_margin(positions), "raw": choice["message"].get("content") or "", "ms": ms}
-
-
-# ---------------------------------------------------------------- sets
-
-def earlier_lines(lines, count_tokens):
-    """Per line of one conversation, the number of earlier lines its history keeps: the classifier's streaming window
-    with count_tokens, else up to WINDOW_MAX - 1 (more than a prompted model's history)."""
-    if count_tokens:
-        return window_sizes(lines, count_tokens)
-    return [min(j, WINDOW_MAX - 1) for j in range(len(lines))]
-
-
-def case_key(conv, text, occurrence):
-    """A case-file message's key: its conversation, its text and which occurrence of that text in the conversation it
-    is (0 for the first)."""
-    return json.dumps([conv, text, occurrence], ensure_ascii=False)
-
-
-def case_keys(lines):
-    """case_key of each (conv, text), in conversation order."""
-    seen = Counter()
-    keys = []
-    for conv, text in lines:
-        keys.append(case_key(conv, text, seen[(conv, text)]))
-        seen[(conv, text)] += 1
-    return keys
-
-
-def attack_conversations(cfg):
-    """conversations() of the attacks set's code (the .py file in data/cases/attacks/): private like the other case
-    sets, and built in code because most attacks use characters a case file cannot hold."""
-    path = next((cfg.data / "cases" / "attacks").glob("*.py"))
-    namespace = {}
-    exec(compile(path.read_text(encoding="utf-8"), str(path), "exec"), namespace)
-    return namespace["conversations"]()
-
-
-def attack_items(cfg):
-    """The attacks set as case items."""
-    items = []
-    for conv, lines in attack_conversations(cfg):
-        for j, (label, speaker, text) in enumerate(lines):
-            items.append({"conv": conv, "channel": "chat", "speaker": speaker, "text": text, "label": label,
-                          "history": [(s, t) for _, s, t in lines[:j]]})
-    return items
-
-
-def case_items(cfg, files, count_tokens):
-    """Each case-file conversation is replayed as one conversation, as the model host would score it."""
-    return windowed(load_cases([cfg.path(f) for f in files]), count_tokens)
-
-
-def case_set_items(cfg, set_name, count_tokens):
-    """case_items of an [eval.sets] entry, or of the attacks set."""
-    if set_name == "attacks":
-        return windowed(attack_items(cfg), count_tokens)
-    return case_items(cfg, cfg["eval"]["sets"][set_name], count_tokens)
-
-
-def windowed(items, count_tokens):
-    """(key, item) of case items, each history cut to its conversation's streaming window."""
-    starts = [j for j, it in enumerate(items) if not it["history"]] + [len(items)]
-    for a, b in zip(starts, starts[1:]):
-        last = items[b - 1]
-        sizes = earlier_lines(last["history"] + [(last["speaker"], last["text"])], count_tokens)
-        for j in range(a, b):
-            items[j]["history"] = items[j]["history"][j - a - sizes[j - a]:]
-    return list(zip(case_keys([(it["conv"], it["text"]) for it in items]), items))
-
-
-def message_items(cfg, labels, count_tokens):
-    """Messages of messages.parquet, {row: label}, with their history from their conversation's earlier messages."""
-    m = pq.read_table(cfg.data / "messages.parquet", columns=["ts", "channel", "conv", "speaker", "text"]).to_pydict()
-    wanted = {m["conv"][i] for i in labels}
-    convs = defaultdict(list)
-    for i, conv in enumerate(m["conv"]):
-        if conv in wanted:
-            convs[conv].append(i)
-    items = []
-    for rows in convs.values():
-        lines = [(m["speaker"][i], m["text"][i]) for i in rows]
-        for j, (i, n) in enumerate(zip(rows, earlier_lines(lines, count_tokens))):
-            if i in labels:
-                items.append((i, {"conv": m["conv"][i], "channel": m["channel"][i], "speaker": m["speaker"][i],
-                                  "text": m["text"][i], "ts": m["ts"][i], "label": labels[i],
-                                  "history": lines[j - n:j]}))
-    return sorted(items, key=lambda x: x[0])
-
-
-MESSAGE_SETS = ("val", "tf", "train", "outside")
-
-
-def message_labels(cfg, set_name):
-    """{messages.parquet row: label} of a set of messages.parquet rows."""
-    if set_name == "val":
-        v = pq.read_table(cfg.work / "training" / "val.parquet", columns=["row", "label"]).to_pydict()
-        return {r: "ban" if y else "ok" for r, y in zip(v["row"], v["label"])}
-    if set_name in ("tf", "outside"):
-        src = pq.read_table(cfg.data / "messages.parquet", columns=["source"]).column("source").to_pylist()
-        if set_name == "tf":
-            return {i: "ok" for i, s in enumerate(src) if s == "tf"}
-        covered = {r for w in read_jsonl(cfg.data / "windows.jsonl") for r, _, _ in w["lines"]}
-        return {i: "ok" for i in range(len(src)) if i not in covered}
-    return train_sample(cfg)
-
-
-def items_of(cfg, set_name, count_tokens=None):
-    """(key, item) for every message of a set. count_tokens: the classifier's tokenizer, which sets the streaming
-    window (chat.WINDOW_MIN); without it each history holds up to WINDOW_MAX - 1 earlier lines."""
-    if set_name in MESSAGE_SETS:
-        return message_items(cfg, message_labels(cfg, set_name), count_tokens)
-    return case_set_items(cfg, set_name, count_tokens)
-
-
-def scorable_labels(cfg, set_name):
-    """{key: label} of a set's scorable messages, without building their histories."""
-    if set_name in MESSAGE_SETS:
-        return message_labels(cfg, set_name)
-    return {k: it["label"] for k, it in scorable(case_set_items(cfg, set_name, None))}
-
-
-def train_sample(cfg):
-    """{row: label} of the training split's labelled rows in `[review] sample_windows` seeded random windows. Whole
-    windows, so consecutive rows of a conversation share their cached prompt prefix in llama-server."""
-    t = pq.read_table(cfg.work / "training" / "train.parquet", columns=["row", "label"]).to_pydict()
-    lab = pq.read_table(cfg.data / "labels.parquet", columns=["row", "window"]).to_pydict()
-    train = dict(zip(t["row"], t["label"]))
-    by_window = defaultdict(list)
-    for r, w in zip(lab["row"], lab["window"]):
-        if r in train:
-            by_window[w].append(r)
-    # ranked by a seeded hash of the window id, so new windows displace only a few picks and the scores stay reusable
-    picked = sorted(by_window, key=lambda w: hashlib.sha256(f"4:{w}".encode()).digest())[:cfg["review"]["sample_windows"]]
-    return {r: "ban" if train[r] else "ok" for w in picked for r in by_window[w]}
-
-
-def set_source(cfg, set_name):
-    """What a set's messages and labels come from: messages.parquet's batch list (core.MESSAGES), plus val.parquet
-    for val, or the case files. train's rows are picked from train.parquet and labels.parquet, but a row's margin
-    does not depend on them: a row that newly enters the sample is scored by the resume, and consumers take the
-    sample and its labels from those files (set_scores)."""
-    if set_name in MESSAGE_SETS:
-        return {MESSAGES: message_batches(cfg),
-                **({"set": [fingerprint(cfg.work / "training" / "val.parquet")]} if set_name == "val" else {})}
-    if set_name == "attacks":
-        return {"set": hashlib.sha256(json.dumps(attack_conversations(cfg)).encode()).hexdigest()}
-    return {"set": [fingerprint(cfg.path(f)) for f in cfg["eval"]["sets"][set_name]]}
-
-
-def set_inputs(cfg, spec, set_name, gguf):
-    """What a set's scores from a llama-served model come from (see the module docstring)."""
-    inputs = {**set_source(cfg, set_name), "model": fingerprint(gguf)}
-    if spec["kind"] == "classifier":
-        # the thread count changes only the speed
-        inputs.update(llama=fingerprint(cfg.path(cfg["eval"]["server"]).parent), context=window_settings(cfg),
-                      prompt=PROMPT_FORMAT, tokenizer=spec.get("tokenizer"))
-    else:
-        inputs.update(**server_inputs(cfg, "chat"), prompt=fingerprint(cfg.path(spec["prompt"])),
-                      history=spec["history"])
-    return inputs
-
-
-def current_scores(cfg, path, inputs, set_name):
-    """A set's scores for its current scorable messages, with their current labels, and the number of those messages
-    still unscored; None when the file is missing or was scored from other inputs. A consumer uses a set only when
-    nothing is unscored."""
-    if not is_current(path, inputs):
+from pathlib import Path
+
+import numpy as np
+
+from .core import log, run, write_text
+from .inputs import KINDS, OUTS
+from .truth import table_path
+
+PERIODS = ("val", "test")
+RULES = {"ban": "ban", "hold": "hold", "nothing": "nothing", "not ban": "notban"}
+CLEAN_LINES = 20        # a clean sitting of this many lines or more is an active clean player
+SUPERVISION = ["sitting", "sitting_ruling", "sitting_source", "hold"]
+LABELS = SUPERVISION + ["ban_here"]
+
+
+# ---------------------------------------------------------------- runs
+
+def thresholds(score, shares):
+    """The score of the k-th highest line, k = ceil(share * lines): holding score >= it holds that share."""
+    s = np.sort(np.asarray(score, np.float64))[::-1]
+    return [float(s[max(1, int(np.ceil(h * len(s)))) - 1]) for h in shares]
+
+
+def level(share):
+    return f"{100 * share:g}%"
+
+
+def check_scores(name, df, prefixes, period=True):
+    cols = ["dossier", "id", "coverage"] + (["period"] if period else []) + [f"{p}_{o}" for p in prefixes for o in OUTS]
+    missing = [c for c in cols if c not in df.columns]
+    if missing:
+        raise SystemExit(f"{name}: the scores lack the columns {', '.join(missing)}")
+    if df.duplicated(["dossier", "id"]).any():
+        raise SystemExit(f"{name}: a line is scored twice")
+    if period and not df.period.isin(PERIODS).all():
+        raise SystemExit(f"{name}: a scored line's period is neither val nor test")
+    if not df.coverage.isin(["cascade", "c", "reject"]).all():
+        raise SystemExit(f"{name}: invalid coverage route")
+    if not np.isfinite(df.loc[df.coverage != "reject", [f"{p}_{o}" for p in prefixes for o in OUTS]].to_numpy()).all():
+        raise SystemExit(f"{name}: non-finite model score")
+
+
+def system_run(name, scores, thr):
+    """A production C-only run at validation diagnostic and recall thresholds."""
+    check_scores(name, scores, ("c",))
+    if thr.get("scoring", {}).get("mode") != "c_only" or not scores.coverage.isin(["c", "reject"]).all():
+        raise SystemExit(f"{name}: production evaluation requires explicit C-only scores")
+    return {"name": name, "kind": "c_only", "owner": scores.reset_index(drop=True), "creayun": None,
+            "thresholds": {"1%": float(thr["hold_1pct"]), "2%": float(thr["hold_2pct"]),
+                           "recall": float(thr["hold_recall"])}}
+
+
+def c_run(name, scores, creayun, shares):
+    """A run of C alone: held at a level when C's hold logit reaches the score that holds the level's share of the
+    run's own validation lines."""
+    check_scores(name, scores, ("c",))
+    if creayun is not None:
+        check_scores(name + " (Creayun)", creayun, ("c",), period=False)
+    val = scores.c_hold.to_numpy()[(scores.period.to_numpy() == "val") & (scores.coverage.to_numpy() != "reject")]
+    if not len(val):
+        raise SystemExit(f"{name}: no validation line is scored")
+    return {"name": name, "kind": "c", "owner": scores.reset_index(drop=True), "creayun": creayun,
+            "thresholds": dict(zip(map(level, shares), thresholds(val, shares)))}
+
+
+def held(r, df):
+    """Return total blocks for each threshold. Report model holds and input rejects separately."""
+    z = df.c_hold.to_numpy()
+    routes = df.coverage.to_numpy()
+    scored = routes != "reject"
+    return {lv: (routes == "reject") | (scored & (z >= th)) for lv, th in r["thresholds"].items()}, None
+
+
+def slot_thresholds(cfg, folder):
+    """Use the shared production calibration guard for every evaluated export slot."""
+    from .export import slot_thresholds as calibrated_thresholds
+    thr = json.loads((folder / "thresholds.json").read_text(encoding="utf-8"))
+    model = thr.get("models", {}).get("c", {}).get("folder")
+    if not isinstance(model, str) or not model:
+        raise SystemExit(f"{folder}: thresholds do not identify their C model")
+    return calibrated_thresholds(cfg, {"c": Path(model), "out": folder, "models": folder / "models"})
+
+
+def load_run(cfg, name, shares):
+    import pandas as pd
+    folder = Path(name)
+    if not folder.is_dir():
+        roots = (cfg.path(cfg["export"]["out"]), cfg.path(cfg["train"]["out"]))
+        found = [root / name for root in roots if (root / name).is_dir()]
+        if not found:
+            raise SystemExit(f"{name}: no run of that name in {roots[0]} or {roots[1]}, and no such folder")
+        if len(found) > 1:
+            raise SystemExit(f"{name} is both {found[0]} (the system run) and {found[1]} (C alone); give the path")
+        folder = found[0]
+    if (folder / "torch.parquet").exists():
+        if not (folder / "thresholds.json").exists():
+            raise SystemExit(f"{folder}: torch.parquet without thresholds.json")
+        thr = slot_thresholds(cfg, folder)
+        r = system_run(folder.name, pd.read_parquet(folder / "torch.parquet"), thr)
+        r["models"] = {"c": thr["models"]["c"]["folder"]}
+        return r
+    if (folder / "scores.parquet").exists():
+        cre = folder / "creayun.parquet"
+        r = c_run(folder.name, pd.read_parquet(folder / "scores.parquet"),
+                  pd.read_parquet(cre) if cre.exists() else None, shares)
+        r["models"] = {"c": folder.resolve().as_posix()}
+        return r
+    raise SystemExit(f"{folder}: neither torch.parquet (a system run) nor scores.parquet (a C run)")
+
+
+# ---------------------------------------------------------------- labels
+
+def truth_lines(path, batch):
+    """The judged lines of a batch's truth table: dossier, id, batch, pos (the row in the table, the lines' order),
+    split, the seven kinds and masked (left out of the kind loss: an unsure line no read marked, a spam raid's, or -1 on
+    every kind)."""
+    import pandas as pd
+    df = pd.read_parquet(path, columns=["dossier", "id", "judged", "split", "unsure_masked", "left_out"] + KINDS)
+    df["pos"] = np.arange(len(df))
+    df["masked"] = df.unsure_masked.to_numpy() | df.left_out.to_numpy() | (df[KINDS].to_numpy() == -1).all(1)
+    df = df[df.judged.to_numpy()].drop(columns=["judged", "unsure_masked", "left_out"])
+    df.insert(2, "batch", batch)
+    return df.reset_index(drop=True)
+
+
+def label_set(name, labels, lines):
+    """A label set: labels (dossier, id, batch, period, sitting, sitting_ruling, sitting_source, hold, ban_here) and
+    lines (truth_lines of its batches, concatenated in batch order)."""
+    for what, df in (("labels", labels), ("lines", lines)):
+        if df.duplicated(["dossier", "id"]).any():
+            raise SystemExit(f"labels {name}: a line is in its {what} twice")
+    return {"name": name, "labels": labels.reset_index(drop=True), "lines": lines.reset_index(drop=True),
+            "batches": list(dict.fromkeys(lines.batch))}
+
+
+def forward_labels(cfg):
+    import pandas as pd
+    e = cfg["eval"]
+    path = cfg.path(e["forward"])
+    if not path.exists():
         return None
-    wanted = scorable_labels(cfg, set_name)
-    rows, seen = [], set()
-    for r in read_jsonl(path):
-        if r["k"] in wanted and r["k"] not in seen:
-            seen.add(r["k"])
-            rows.append(dict(r, label=wanted[r["k"]]))
-    return rows, len(wanted) - len(seen)
+    names = e["forward_batches"]
+    x = pd.read_parquet(path, columns=["dossier", "id", "table", "period"] + LABELS)
+    unknown = sorted(set(x.table) - set(names))
+    if unknown:
+        raise SystemExit(f"{path}: the tables {', '.join(unknown)} are not in [eval] forward_batches")
+    x["batch"] = x.table.map(names)
+    lines = pd.concat([truth_lines(table_path(cfg, b), b) for b in dict.fromkeys(names.values())])
+    return label_set("forward", x[["dossier", "id", "batch", "period"] + LABELS], lines)
 
 
-def set_scores(cfg, model, set_name):
-    """current_scores of a [models.*] entry's `uv run eval` scores on a set."""
-    spec = cfg["models"][model]
-    if "gguf" not in spec:
+def batch_labels(cfg):
+    """Read the saved hold labels and resolve supported ban timing without changing those files."""
+    import pandas as pd
+    from .labels import build_label_cases, resolve_labels
+
+    root = cfg.path(cfg["dossier"]["batches"])
+    paths = {b: root / b / "hold.parquet" for b in cfg["eval"]["batches"]}
+    have = [b for b, p in paths.items() if p.exists()]
+    if not have:
         return None
-    return current_scores(cfg, cfg.work / "eval" / model / f"{set_name}.jsonl",
-                          set_inputs(cfg, spec, set_name, cfg.path(spec["gguf"])), set_name)
+    if len(have) < len(paths):
+        raise SystemExit(f"hold.parquet is missing in {', '.join(sorted(set(paths) - set(have)))}")
+    unknown = sorted(set(paths) - set(cfg["labels"]["batches"]))
+    if unknown:
+        raise SystemExit(f"[eval] batches outside [labels] batches: {', '.join(unknown)}")
+    tables, cases, owner, _, where = build_label_cases(cfg)
+    resolved, _, _ = resolve_labels(cfg, paths, tables, cases, owner, where)
+
+    keys = ["dossier", "id"]
+    frames = []
+    for b, p in paths.items():
+        saved = pd.read_parquet(p, columns=keys + SUPERVISION).set_index(keys)
+        current = resolved[b].set_index(keys)
+        if not saved.index.is_unique or not current.index.is_unique:
+            raise SystemExit(f"{p}: saved and resolved label keys must be unique")
+        if len(saved) != len(current) or not saved.index.isin(current.index).all():
+            raise SystemExit(f"{p}: saved and resolved label keys differ")
+        current = current.reindex(saved.index)
+        for field in SUPERVISION:
+            before, after = saved[field], current[field]
+            equal = before.eq(after) | (before.isna() & after.isna())
+            if not equal.fillna(False).all():
+                raise SystemExit(f"{p}: saved and resolved {field} values differ")
+        frames.append(saved.assign(batch=b, ban_here=current.ban_here).reset_index())
+    lines = pd.concat([truth_lines(table_path(cfg, b), b) for b in paths])
+    labels = pd.concat(frames)
+    labels = labels.merge(lines[["dossier", "id", "split"]], on=["dossier", "id"], how="left", validate="1:1")
+    if labels.split.isna().any():
+        raise SystemExit(f"{int(labels.split.isna().sum())} lines of hold.parquet are no judged line of their batch")
+    labels = labels.rename(columns={"split": "period"})
+    return label_set("new", labels[["dossier", "id", "batch", "period"] + LABELS], lines)
 
 
-def scorable(items):
-    # real-chat case files mark context lines amb; they are history only, never scored
-    return [(k, it) for k, it in items if not (it["label"] == "amb" and it["conv"].startswith("real-"))]
+def owner_lines(name, scores, ls, period):
+    """Every judged line of the requested period, with its scores, kinds, order and labels. Refuses incomplete scores,
+    including smoke runs, so every run uses the same lines and denominators."""
+    expected = ls["lines"].loc[ls["lines"].split == period, ["dossier", "id"]]
+    coverage = expected.merge(scores[["dossier", "id"]], on=["dossier", "id"], how="outer", validate="1:1",
+                              indicator=True)
+    missing = int((coverage._merge == "left_only").sum())
+    extra = int((coverage._merge == "right_only").sum())
+    if missing or extra:
+        raise SystemExit(f"{name}: incomplete {period} scores for labels {ls['name']}: {missing:,} judged lines "
+                         f"are not scored and {extra:,} scored lines are outside that period; score every judged "
+                         "line before evaluation")
+    u = scores[["dossier", "id", "period", "coverage"]].merge(ls["lines"].drop(columns="split"), on=["dossier", "id"], how="left",
+                                                  validate="1:1")
+    if u.pos.isna().any():
+        raise SystemExit(f"{name}: {int(u.pos.isna().sum())} scored lines are no judged line of the batches of labels "
+                         f"{ls['name']} ({', '.join(ls['batches'])})")
+    u = u.merge(ls["labels"].drop(columns="batch").rename(columns={"period": "label_period"}), on=["dossier", "id"],
+                how="left", validate="1:1")
+    off = u.label_period.notna() & (u.label_period != u.period)
+    if off.any():
+        raise SystemExit(f"{name}: {int(off.sum())} scored lines are in another period than labels {ls['name']} give "
+                         "them")
+    return u.drop(columns="label_period")
 
 
-def record(k, it, res):
-    """One scored message as stored in <set>.jsonl."""
-    return {"k": k, **{f: it[f] for f in ("conv", "channel", "speaker", "text", "label") if f in it},
-            **({"ts": it["ts"]} if "ts" in it else {}), **res}
+# ---------------------------------------------------------------- measures
+
+def owner_sittings(u):
+    """The owner's ruled sittings among the lines: dossier, ruling, lines, banpos (the ban line's place, ban sittings)."""
+    import pandas as pd
+    o = u[(u.sitting_source == "owner") & u.sitting_ruling.isin(list(RULES))]
+    g = o.groupby("sitting")
+    return pd.DataFrame({"dossier": g.dossier.first(), "ruling": g.sitting_ruling.first(), "lines": g.size(),
+                         "banpos": o[o.ban_here == 1].groupby("sitting").pos.min()})
 
 
-def start_scores(out, inputs):
-    """Keeps a set's score file when it was made from `inputs` (a partial run continues), else starts it over."""
-    if out.exists() and not is_current(out, inputs):
-        log.info("%s was scored from other inputs (%s); scoring it again", out.name, ", ".join(changed_keys(out, inputs)))
-        out.unlink()
-    record_inputs(out, inputs)
+def owner_measures(u, held, files, passed=None):
+    """Numerator and denominator per log file of every measure, for the lines u held where `held`."""
+    import pandas as pd
+    f = pd.Categorical(u.dossier, categories=files).codes
+
+    def lsum(x):
+        return np.bincount(f, weights=np.asarray(x, float), minlength=len(files))
+
+    firm = (u[KINDS].to_numpy() == 1).any(1)
+    h = u.hold.to_numpy(float)
+    own = u.sitting_source.to_numpy() == "owner"
+    rejected = u.coverage.to_numpy() == "reject"
+    model = held & ~rejected
+    total = lsum(np.ones(len(u)))
+    M = {"blocked_share": (lsum(held), total), "model_held_share": (lsum(model), total),
+         "rejected_share": (lsum(rejected), total)}
+    if passed is not None:
+        M["passed_share"] = (lsum(passed), lsum(np.ones(len(u))))
+    M |= {"recall_all": (lsum(held & (h == 1)), lsum(h == 1)),
+          "recall_model_all": (lsum(model & (h == 1)), lsum(h == 1)),
+          "recall_model_covered": (lsum(model & (h == 1)), lsum((h == 1) & ~rejected)),
+          "recall_owner": (lsum(held & (h == 1) & own), lsum((h == 1) & own)),
+          "per1000_h0": (1000 * lsum(held & (h == 0)), lsum(h == 0)),
+          "let_through_held": (lsum(held & firm & (h == 0)), lsum(firm & (h == 0)))}
+    for k in KINDS:
+        pk = (h == 1) & (u[k].to_numpy() == 1)
+        M[f"kind_{k}"] = (lsum(held & pk), lsum(pk))
+        M[f"model_kind_{k}"] = (lsum(model & pk), lsum(pk & ~rejected))
+    clean = u.sitting_ruling.to_numpy() == "clean"
+    cl = u[clean].assign(held=held[clean])
+    cl = cl.groupby("sitting").agg(n=("id", "size"), held=("held", "sum"), dossier=("dossier", "first"))
+    cl = cl[cl.n >= CLEAN_LINES]
+    fc = pd.Categorical(cl.dossier, categories=files).codes
+    one = np.bincount(fc, minlength=len(files)).astype(float)
+    M["clean20_any"] = (np.bincount(fc, weights=(cl.held >= 1).astype(float), minlength=len(files)), one)
+    M["clean20_5"] = (np.bincount(fc, weights=(cl.held >= 5).astype(float), minlength=len(files)), one)
+    s = owner_sittings(u)
+    k = u.sitting.to_numpy()
+    inown = pd.Series(k).isin(s.index).to_numpy()
+    x = pd.DataFrame({"sitting": k[inown], "held": held[inown], "pos": u.pos.to_numpy()[inown]})
+    x["banpos"] = x.sitting.map(s.banpos)
+    anyh = x.groupby("sitting").held.any().reindex(s.index)
+    byh = x[x.pos == x.banpos].groupby("sitting").held.any().reindex(s.index, fill_value=False)
+    bob = x[x.pos <= x.banpos].groupby("sitting").held.any().reindex(s.index, fill_value=False)
+    fs = pd.Categorical(s.dossier, categories=files).codes
+
+    def ssum(v):
+        return np.bincount(fs, weights=np.asarray(v, float), minlength=len(files))
+
+    for rl, nm in RULES.items():
+        r = (s.ruling == rl).to_numpy()
+        M[f"{nm}_any"] = (ssum(r & anyh.to_numpy()), ssum(r))
+    hb = (s.ruling == "ban").to_numpy() & s.banpos.notna().to_numpy()
+    M["ban_by_held"] = (ssum(hb & byh.to_numpy()), ssum(hb))
+    M["ban_by_or_before"] = (ssum(hb & bob.to_numpy()), ssum(hb))
+    return M
 
 
-def score_set(name, set_name, scorer, items, out, inputs):
-    """scorer(conversations) yields (key, item, result) for the messages of conversations [[(key, item), ...], ...],
-    each in conversation order."""
-    start_scores(out, inputs)
-    done = {r["k"] for r in read_jsonl(out, repair=True)}
-    todo = [(k, it) for k, it in scorable(items) if k not in done]
-    if not todo:
-        return
-    convs = defaultdict(list)
-    for k, it in todo:
-        convs[it["conv"]].append((k, it))
-    with JsonlAppender(out) as w, progress(f"{name} {set_name}", len(todo), "msgs") as advance:
-        for k, it, res in scorer(list(convs.values())):
-            w.write(record(k, it, res))
-            advance()
+def resamples(files, n, seed):
+    """n resamples of the files with replacement, as weights (n, files)."""
+    return np.random.default_rng(seed).multinomial(len(files), [1 / len(files)] * len(files), size=n).astype(float)
 
 
-# ---------------------------------------------------------------- summaries
-
-def score(r, platt=None):
-    """P(ban): sigmoid(a * margin + b) with the model's Platt parameters [a, b], sigmoid(margin) without them."""
-    if r.get("margin") is None:
-        return r.get("p_ban") or 0.0
-    a, b = platt or (1.0, 0.0)
-    return sigmoid(a * r["margin"] + b)
-
-
-def auroc(pos, neg):
-    if not pos or not neg:
-        return float("nan")
-    neg = sorted(neg)
-    wins = sum(bisect.bisect_left(neg, p) + 0.5 * (bisect.bisect_right(neg, p) - bisect.bisect_left(neg, p))
-               for p in pos)
-    return wins / (len(pos) * len(neg))
-
-
-def pr_auc(scored):
-    scored = sorted(scored, key=lambda x: -x[0])
-    total = sum(1 for _, y in scored if y)
-    tp = fp = 0
-    area = prev = 0.0
-    for _, y in scored:
-        tp += y
-        fp += not y
-        recall = tp / max(total, 1)
-        area += (recall - prev) * (tp / (tp + fp))
-        prev = recall
-    return area
-
-
-def message_stats(rows, platt=None, cut=None):
-    """Per-message ban AUROC and PR-AUC; with cut (the margin at val FPR 1%), the bans and others at or above it."""
-    labelled = [r for r in rows if r["label"] in ("ban", "ok")]
-    scored = [(score(r, platt), r["label"] == "ban") for r in labelled]
-    pos = [s for s, y in scored if y]
-    neg = [s for s, y in scored if not y]
-    stats = {"auroc": auroc(pos, neg), "pr_auc": pr_auc(scored), "ban": len(pos), "not": len(neg)}
-    if cut is not None:
-        hits = [r["label"] == "ban" for r in labelled if r["margin"] is not None and r["margin"] >= cut]
-        stats.update(caught=sum(hits), flagged=len(hits) - sum(hits))
-    return stats
-
-
-def ranking(rows):
-    """AUROC, PR-AUC and, at each val false-positive rate in FPRS, the recall and the margin it takes, of rows with a
-    ban/ok label and a margin."""
-    import numpy as np
-    from sklearn.metrics import average_precision_score, roc_auc_score, roc_curve
-    rows = [r for r in rows if r["label"] in ("ban", "ok") and r.get("margin") is not None]
-    y = [int(r["label"] == "ban") for r in rows]
-    m = [r["margin"] for r in rows]
-    out = {"auroc": float(roc_auc_score(y, m)), "pr_auc": float(average_precision_score(y, m)), "ban": sum(y),
-           "ok": len(y) - sum(y)}
-    fpr, tpr, thr = roc_curve(y, m)
-    for f in FPRS:
-        k = np.searchsorted(fpr, f, side="right") - 1
-        out[f"recall@fpr{f}"] = float(tpr[k])
-        out[f"margin@fpr{f}"] = float(thr[k])
+def summarise(M, W):
+    """{measure: (point, resampled ratios, numerator, denominator)}."""
+    out = {}
+    for m, (num, den) in M.items():
+        with np.errstate(invalid="ignore", divide="ignore"):
+            boot = (W @ num) / (W @ den)
+        out[m] = (num.sum() / den.sum() if den.sum() else np.nan, boot, float(num.sum()), float(den.sum()))
     return out
 
 
-def novel_rows(cfg, rows):
-    """The rows whose normalized text (stripped, lowercased, as train's duplicate cap counts it) appears nowhere in
-    train.parquet. Spam and common phrases repeat across conversations, so val shares many texts with train."""
-    seen = {t.strip().lower() for t in pq.read_table(cfg.work / "training" / "train.parquet", columns=["text"]).column("text")
-            .to_pylist()}
-    return [r for r in rows if r["text"].strip().lower() not in seen]
+def ci(boot):
+    if np.isnan(boot).all():
+        return [np.nan, np.nan]
+    return [float(np.nanpercentile(boot, 2.5)), float(np.nanpercentile(boot, 97.5))]
 
 
-def val_metrics(cfg, rows):
-    """{"val": ranking of every val row, "val_novel": ranking of the rows with text unseen in train} and their summary
-    lines."""
-    metrics = {"val": ranking(rows), "val_novel": ranking(novel_rows(cfg, rows))}
-    lines = []
-    for key, what in (("val", "all val rows"), ("val_novel", "val rows whose text never appears in train")):
-        s = metrics[key]
-        lines.append(f"{what}: AUROC {s['auroc']:.4f}, PR-AUC {s['pr_auc']:.4f} ({s['ban']} ban, {s['ok']} ok); "
-                     + ", ".join(f"recall {s[f'recall@fpr{f}']:.3f} at FPR {f:.1%}" for f in FPRS))
-    return metrics, lines
+def difference(a, b):
+    """a - b of two summaries, paired on their resamples: [point, low, high, mark]."""
+    p = float(a[0] - b[0])
+    lo, hi = ci(a[1] - b[1])
+    return [p, lo, hi, "*" if (lo > 0 or hi < 0) else ""]
 
 
-def case_summary(rows, platt=None, cut=None):
-    s = message_stats(rows, platt, cut)
-    lines = [f"per-message ban AUROC {s['auroc']:.3f}, PR-AUC {s['pr_auc']:.3f} ({s['ban']} ban, {s['not']} not)"]
-    if cut is not None:
-        lines.append(f"at the val FPR 1% margin {cut:.3f}: {s['caught']}/{s['ban']} bans caught, {s['flagged']} "
-                     f"others flagged")
-    players = defaultdict(list)
-    for r in rows:
-        if r["label"] != "amb":
-            players[(r["conv"], r["speaker"])].append(r)
-    for name, k, n in (("single message", 1, 1), ("2 of last 3", 2, 3), ("3 of last 5", 3, 5)):
-        offenders, innocents = [], []
-        for msgs in players.values():
-            s = [score(m, platt) for m in msgs]
-            vals = [sorted(s[max(0, i + 1 - n):i + 1], reverse=True)[k - 1] if i + 1 >= k else 0.0
-                    for i in range(len(s))]
-            (offenders if any(m["label"] == "ban" for m in msgs) else innocents).append(max(vals))
-        t = max(innocents, default=0.0) + 1e-9
-        lines.append(f"{name:15s} player AUROC {auroc(offenders, innocents):.3f}; at zero innocent bans "
-                     f"{sum(o >= t for o in offenders)}/{len(offenders)} offenders caught")
-    return lines
+def evaluate_owner(runs, ls, periods, nb, seed):
+    """Per period: the files, lines, labels and owner's sittings it holds, and {run: {level: {measure: summary}}}."""
+    out = {}
+    for p in periods:
+        per, files = {}, None
+        for r in runs:
+            df = r["owner"][r["owner"].period.to_numpy() == p].reset_index(drop=True)
+            u = owner_lines(r["name"], df, ls, p)
+            fs = sorted(u.dossier.unique())
+            if files is None:
+                files, W, first = fs, resamples(fs, nb, seed), u
+            elif fs != files:
+                raise SystemExit(f"{r['name']} scores other {p} files than {runs[0]['name']}: runs are compared on the "
+                                 "same files")
+            hl, passed = held(r, df)
+            per[r["name"]] = {lv: summarise(owner_measures(u, x, files, passed), W) for lv, x in hl.items()}
+        s = owner_sittings(first)
+        out[p] = {"files": len(files), "lines": len(first),
+                  "hold": {str(h): int((first.hold == h).sum()) for h in (1, 0, -1)},
+                  "unlabelled": int(first.hold.isna().sum()),
+                  "sittings": {rl: int((s.ruling == rl).sum()) for rl in RULES},
+                  "ban_lines": int(s.banpos.notna().sum()), "runs": per}
+    return out
 
 
-def known_threshold(cfg, rows, platt=None):
-    """Single-message rule at the highest threshold that still triggers every known offender found in rows: the
-    threshold, the offender who sets it, how many known offenders were found and how many players trigger."""
-    best = {}
-    for r in rows:
-        p = r["speaker"].lower()
-        best[p] = max(best.get(p, 0.0), score(r, platt))
-    known = {p: best[p] for p in (k.lower() for k in cfg["eval"].get("known_offenders", [])) if p in best}
-    if not known:
-        return None
-    setter = min(known, key=known.get)
-    return {"threshold": known[setter], "set_by": setter, "known": len(known),
-            "players": sum(v >= known[setter] for v in best.values())}
+def creayun_lines(cfg):
+    b = cfg["eval"]["creayun"]
+    m = truth_lines(table_path(cfg, b), b)
+    return m[m.split == "test_creayun"].reset_index(drop=True)
 
 
-def tf_summary(cfg, rows, platt=None, cut=None):
-    known = [p.lower() for p in cfg["eval"].get("known_offenders", [])]
-    by_player = defaultdict(list)
-    for r in sorted(rows, key=lambda r: r["k"]):
-        by_player[r["speaker"].lower()].append(r)
-    days = len({(r.get("ts") or "")[:10] for r in rows if r.get("ts")}) or 1
-    lines = [f"{len(rows):,} messages, {len(by_player):,} players, {days} days"]
-    if cut is not None:
-        from .failures import message_labels
-        labels = message_labels(cfg)
-        offenders = {p for p, ms in by_player.items() if any(labels.get(r["k"], ("ok",))[0] == "ban" for r in ms)}
-        hit = {p for p, ms in by_player.items() if any(r["margin"] is not None and r["margin"] >= cut for r in ms)}
-        lines.append(f"at the val FPR 1% cut, P(ban) >= {score({'margin': cut}, platt):.4g}: {len(hit & offenders)} "
-                     f"of {len(offenders)} labelled offenders (a row labelled ban) triggered, {len(hit - offenders)} "
-                     f"other players ({len(hit) / days:.2f} players/day)")
-    kt = known_threshold(cfg, rows, platt)
-    if kt:
-        lines.append(f"every known offender found ({kt['known']} of {len(known)}) triggers at P(ban) >= "
-                     f"{kt['threshold']:.4g}, single message, set by {kt['set_by']}: {kt['players']} players "
-                     f"triggered ({kt['players'] / days:.2f}/day)")
-    for t in cfg["eval"]["thresholds"]:
-        for name, (k, n) in {"single": (1, 1), "2-of-3": (2, 3), "3-of-5": (3, 5)}.items():
-            banned = {}
-            for p, msgs in by_player.items():
-                window, last = [], None
-                for r in msgs:
-                    ts = r.get("ts")
-                    now = time.mktime(time.strptime(ts, "%Y-%m-%dT%H:%M:%S")) if ts else None
-                    if last is not None and now is not None and now - last > 600:
-                        window = []  # the rule state resets after 10 quiet minutes
-                    last = now if now is not None else last
-                    window = (window + [score(r, platt) >= t])[-n:]
-                    if sum(window) >= k:
-                        banned[p] = r
-                        break
-            caught = [p for p in known if p in banned]
-            lines.append(f"t={t} {name:6s}: {len(banned)} players triggered ({len(banned) / days:.2f}/day); known "
-                         f"offenders {len(caught)}/{len(known)}" + (f", missed {sorted(set(known) - set(caught))}"
-                                                                     if len(caught) < len(known) else ""))
-    return lines
+def evaluate_creayun(runs, m, shares, kind_share, nb, seed):
+    """On Creayun's held-out lines m (truth_lines), for the runs that score them: {run: {measure: summary}}, and the
+    thresholds, set on each run's owner's validation lines."""
+    import pandas as pd
+    y = m[KINDS].to_numpy()
+    zero = ~m.masked.to_numpy() & (y == 0).all(1)
+    groups = {**{k: y[:, j] == 1 for j, k in enumerate(KINDS)}, "any kind": (y == 1).any(1), "all-zero": zero}
+    files = sorted(m.dossier.unique())
+    f = pd.Categorical(m.dossier, categories=files).codes
+    W = resamples(files, nb, seed)
+    res, thr, coverage = {}, {}, {}
+    for r in runs:
+        if r["creayun"] is None:
+            continue
+        cre = m[["dossier", "id"]].merge(r["creayun"], on=["dossier", "id"], how="left", validate="1:1")
+        if cre.c_hold.isna().any():
+            raise SystemExit(f"{r['name']}: {int(cre.c_hold.isna().sum())} of Creayun's test_creayun lines are not "
+                             "scored")
+        val = r["owner"][(r["owner"].period == "val") & (r["owner"].coverage != "reject")]
+        th = dict(zip((f"hold {level(s)}" for s in shares), thresholds(val.c_hold.to_numpy(), shares)))
+        for k in KINDS:
+            th[f"{k} {level(kind_share)}"] = thresholds(val[f"c_{k}"].to_numpy(), (kind_share,))[0]
+        thr[r["name"]] = th
+        coverage[r["name"]] = cre.coverage.value_counts().to_dict()
+        M = {}
+        for s in shares:
+            rejected = cre.coverage.to_numpy() == "reject"
+            model = ~rejected & (cre.c_hold.to_numpy() >= th[f"hold {level(s)}"])
+            over = rejected | model
+            for g, mask in groups.items():
+                M[f"hold {level(s)}|{g}"] = over & mask, mask
+                M[f"model hold {level(s)}|{g}"] = model & mask, mask & ~rejected
+        covered = cre.coverage.to_numpy() != "reject"
+        for k in KINDS:
+            over = cre[f"c_{k}"].to_numpy() >= th[f"{k} {level(kind_share)}"]
+            M[f"own|{k}"] = over & groups[k] & covered, groups[k] & covered
+            M[f"own|all-zero:{k}"] = over & zero & covered, zero & covered
+        M = {key: (np.bincount(f, weights=a.astype(float), minlength=len(files)),
+                   np.bincount(f, weights=b.astype(float), minlength=len(files))) for key, (a, b) in M.items()}
+        res[r["name"]] = summarise(M, W)
+    return {"lines": len(m), "files": len(files), "groups": {g: int(v.sum()) for g, v in groups.items()},
+            "thresholds": thr, "coverage": coverage, "runs": res}
 
 
-def outside_summary(cfg, rows, platt=None):
-    """Rows outside every window are ok only because no risk term opened a window: how many score high, by source."""
-    p = [(score(r, platt), r["k"]) for r in rows]
-    src = pq.read_table(cfg.data / "messages.parquet", columns=["source"]).column("source").to_pylist()
-    lines = [f"{len(rows):,} messages outside every window"]
-    for t in cfg["eval"]["thresholds"]:
-        by = Counter(src[k] for s, k in p if s >= t)
-        lines.append(f"P(ban) >= {t}: {sum(by.values()):,} messages ("
-                     + ", ".join(f"{s} {n:,}" for s, n in by.most_common()) + ")")
-    return lines
+def side_table(ls):
+    """The training period's labelled lines with each kind at 1, and the unmasked all-zero ones, by hold label and
+    batch."""
+    x = ls["labels"][ls["labels"].period == "train"]
+    j = x.drop(columns="batch").merge(ls["lines"].drop(columns="split"), on=["dossier", "id"], how="inner",
+                                      validate="1:1")
+    y = j[KINDS].to_numpy()
+    sel = {**{k: y[:, i] == 1 for i, k in enumerate(KINDS)}, "any kind": (y == 1).any(1),
+           "all-zero unmasked": ~j.masked.to_numpy() & (y == 0).all(1)}
+    rows = {}
+    for k, s in sel.items():
+        g = j[s]
+        rows[k] = {"lines": len(g), **{str(h): int((g.hold == h).sum()) for h in (1, 0, -1)},
+                   "by_batch": {b: int((g.batch == b).sum()) for b in ls["batches"]}}
+    return {"labelled": len(x), "without_line": len(x) - len(j), "rows": rows}
 
 
-def set_summary(cfg, set_name, rows, platt, cut=None):
-    """The summary lines of one set's scores. cut: the margin at val FPR 1%, the operating cut."""
-    if set_name == "tf":
-        return tf_summary(cfg, rows, platt, cut)
-    if set_name == "outside":
-        return outside_summary(cfg, rows, platt)
-    if set_name == "val":
-        return val_metrics(cfg, rows)[1] + case_summary(rows, platt)
-    return case_summary(rows, platt, cut)
+def evaluate(runs, sets, creayun, shares, kind_share, nb, seed, periods=PERIODS):
+    """Everything eval measures: {runs, labels: {set: {period: ...}}, side: {set: ...}, creayun}, each measure a
+    summary (point, resampled ratios, numerator, denominator)."""
+    out = {"runs": {r["name"]: {"kind": r["kind"], "models": r["models"],
+                                "thresholds": r["thresholds"]} for r in runs},
+           "labels": {ls["name"]: evaluate_owner(runs, ls, periods, nb, seed) for ls in sets},
+           "side": {ls["name"]: side_table(ls) for ls in sets}}
+    out["creayun"] = evaluate_creayun(runs, creayun, shares, kind_share, nb, seed) if creayun is not None else None
+    return out
 
 
-def fit_platt(cfg, rows):
-    """Platt scaling and ranking metrics from val rows. Returns (platt dict, metrics, summary lines)."""
-    import numpy as np
-    from sklearn.linear_model import LogisticRegression
-    y = [int(r["label"] == "ban") for r in rows]
-    m = [r["margin"] for r in rows]
-    lr = LogisticRegression(C=1e6, max_iter=1000).fit(np.array([[x] for x in m]), y)
-    platt = {"a": float(lr.coef_[0][0]), "b": float(lr.intercept_[0])}
-    metrics, lines = val_metrics(cfg, rows)
-    for f in FPRS:
-        platt[f"margin@fpr{f}"] = metrics["val"][f"margin@fpr{f}"]
-    lines += [f"at val FPR {f:.1%}: margin >= {platt[f'margin@fpr{f}']:.3f}" for f in FPRS]
-    lines.append(f"Platt (calibrated on val's {sum(y) / len(y):.1%} ban, not live chat's): P(ban) = "
-                 f"sigmoid({platt['a']:.4f} * margin {'-' if platt['b'] < 0 else '+'} {abs(platt['b']):.4f})")
-    return platt, metrics, lines
+# ---------------------------------------------------------------- the report
+
+def one(s):
+    return {"point": float(s[0]), "ci": ci(s[1]), "num": s[2], "den": s[3]}
 
 
-def toml_string(s):
-    """A TOML basic string: JSON's string escapes are all valid TOML escapes, so a Windows path keeps its
-    backslashes."""
-    return json.dumps(s, ensure_ascii=False)
+def plain(out, base):
+    """The JSON form: each summary as point, interval, numerator and denominator, and each later run's difference from
+    base ([point, low, high, mark])."""
+    j = {"runs": out["runs"], "base": base, "labels": {}, "side": out["side"]}
+    for name, periods in out["labels"].items():
+        j["labels"][name] = {}
+        for p, d in periods.items():
+            b = d["runs"][base]
+            j["labels"][name][p] = {
+                **{k: v for k, v in d.items() if k != "runs"},
+                "runs": {r: {lv: {m: one(s) for m, s in ms.items()} for lv, ms in lvs.items()}
+                         for r, lvs in d["runs"].items()},
+                "difference": {r: {lv: {m: difference(s, b[lv][m]) for m, s in ms.items() if m in b[lv]}
+                                   for lv, ms in lvs.items() if lv in b}
+                               for r, lvs in d["runs"].items() if r != base}}
+    c = out["creayun"]
+    if c is not None:
+        b = c["runs"].get(base)
+        j["creayun"] = {**{k: v for k, v in c.items() if k != "runs"},
+                        "runs": {r: {m: one(s) for m, s in ms.items()} for r, ms in c["runs"].items()},
+                        "difference": {} if b is None else {r: {m: difference(s, b[m]) for m, s in ms.items()}
+                                                            for r, ms in c["runs"].items() if r != base}}
+    return j
 
 
-def write_classifier(cfg, gguf, tokenizer, platt=None):
-    """data/classifier.toml's [models.classifier]. `export` writes it for a new GGUF without Platt parameters; `eval`
-    adds them, fitted on that GGUF's own val margins, so calibration and thresholds come from the file that ships."""
-    text = (f"# Written by `uv run export` and `uv run eval`. Overrides ecc.toml; local.toml overrides it.\n"
-            f"[models.classifier]\ngguf = {toml_string(gguf)}\n"
-            f"tokenizer = {toml_string(tokenizer)}   # the base model the run was trained on\n")
-    if platt:
-        text += f"platt = [{platt[0]!r}, {platt[1]!r}]   # P(ban) = sigmoid(a * margin + b), fitted on this GGUF's val\n"
-    write_text(cfg.data / "classifier.toml", text)
-    log.info("[models.classifier] in %s: %s%s", cfg.data / "classifier.toml", gguf,
-             f", Platt a {platt[0]:.4f}, b {platt[1]:.4f}" if platt else ", no Platt yet (`uv run eval` fits it on val)")
+LABEL = {"blocked_share": "lines blocked % (model hold or input rejection)", "model_held_share": "lines held by model %",
+         "rejected_share": "lines rejected before model scoring %", "passed_share": "covered lines reaching C %",
+         "recall_all": "blocked recall, hold = 1 (model or input rejection)",
+         "recall_model_all": "model recall, all hold = 1 lines",
+         "recall_model_covered": "model recall, covered hold = 1 lines",
+         "recall_owner": "blocked recall, hold = 1 in owner-ruled sittings", "per1000_h0": "hold = 0 lines blocked per 1,000",
+         "let_through_held": "marked lines with hold 0 held %",
+         "clean20_any": f"clean {CLEAN_LINES}+-line sittings with 1+ held %",
+         "clean20_5": f"clean {CLEAN_LINES}+-line sittings with 5+ held %",
+         "ban_any": "owner's ban sittings with 1+ line held", "hold_any": "owner's hold sittings with 1+ line held",
+         "nothing_any": "owner's nothing sittings with 1+ line held",
+         "notban_any": "owner's not-ban sittings with 1+ line held", "ban_by_held": "ban sittings: the ban line held",
+         "ban_by_or_before": "ban sittings: a line held by the ban line",
+         **{f"kind_{k}": f"blocked recall, hold = 1 lines with {k} at 1" for k in KINDS},
+         **{f"model_kind_{k}": f"model recall, covered hold = 1 lines with {k} at 1" for k in KINDS}}
+COUNT = {"ban_any", "hold_any", "nothing_any", "notban_any", "ban_by_held", "ban_by_or_before"}
+PER = {"per1000_h0"}
 
 
-def model_sets(cfg, spec):
-    """Every set a [models.*] entry can be scored on; "train" and "outside" are scored only when named."""
-    if spec["kind"] == "classifier":
-        return [*cfg["eval"]["sets"], "attacks", "val", "tf", "train", "outside"]
-    return [*cfg["eval"]["sets"], "attacks", "tf"]   # val, train and outside prompts are built for the classifier
+def cell(m, s):
+    p, (lo, hi), num, den = s["point"], s["ci"], s["num"], s["den"]
+    if m in PER:
+        return f"{p:.1f} [{lo:.1f}-{hi:.1f}] ({num / 1000:.0f} of {den:.0f})"
+    if m in COUNT:
+        return f"{num:.0f}/{den:.0f} [{100 * lo:.0f}-{100 * hi:.0f}%]"
+    return f"{100 * p:.1f} [{100 * lo:.1f}-{100 * hi:.1f}] ({num:.0f}/{den:.0f})"
+
+
+def dcell(m, d, den):
+    p, lo, hi, mark = d
+    if m in PER:
+        return f"{p:+.1f} [{lo:+.1f}, {hi:+.1f}]{mark}"
+    if m in COUNT:
+        return f"{p * den:+.0f} [{100 * lo:+.0f}, {100 * hi:+.0f} pp]{mark}"
+    return f"{100 * p:+.1f} [{100 * lo:+.1f}, {100 * hi:+.1f}]{mark}"
+
+
+def table(res, diff, base, header, rows):
+    """A markdown table: one row per (key, label, measure kind), one column per run, then each later run minus base."""
+    names = list(res)
+    later = [r for r in names if r in diff]
+    L = ["| " + " | ".join([header] + names + [f"{r} - {base}" for r in later]) + " |",
+         "|" + "---|" * (1 + len(names) + len(later))]
+    for key, label, m in rows:
+        cells = [cell(m, res[r][key]) if key in res[r] else "" for r in names]
+        dcells = [dcell(m, diff[r][key], res[r][key]["den"]) if key in diff[r] else "" for r in later]
+        L.append("| " + " | ".join([label] + cells + dcells) + " |")
+    return L
+
+
+def report(j, periods):
+    base, names = j["base"], list(j["runs"])
+    L = [f"# eval: {', '.join(names)}", "",
+         "Cells: the measure [95% interval over resamples of the period's log files, thresholds fixed] (lines or "
+         f"sittings counted / the denominator). Differences are from {base}, paired on the same resamples; * = the "
+         "interval excludes 0. Sitting counts show their interval as shares, their differences as counts with a pp "
+         "interval.", "", "## Runs", ""]
+    for r, x in j["runs"].items():
+        th = ", ".join(f"{lv} {v:.4f}" for lv, v in x["thresholds"].items())
+        m = x["models"]
+        L.append(f"- {r}: C {m['c']}; hold thresholds {th}")
+    for name, per in j["labels"].items():
+        if "test" in per:
+            gate = [f"{r} {s['num']:.0f} of {s['den']:.0f}" for r in names
+                    if (s := per["test"]["runs"][r].get("2%", {}).get("recall_all"))]
+            if gate:
+                L += ["", f"Recall at 2% of the hold = 1 test lines, labels {name}: " + "; ".join(gate) + "."]
+    for name, per in j["labels"].items():
+        timing = ("Ban timing comes from the frozen benchmark." if name == "forward"
+                  else "Ban timing comes from the current rulings and saved reads.")
+        for p in periods:
+            d = per[p]
+            L += ["", f"## Labels {name}: the {'validation' if p == 'val' else 'test'} weeks", "",
+                  timing, "",
+                  f"{d['files']} log files, {d['lines']:,} judged lines (hold = 1 {d['hold']['1']:,}, 0 "
+                  f"{d['hold']['0']:,}, -1 {d['hold']['-1']:,}, no label {d['unlabelled']:,}). The owner's sittings: "
+                  + ", ".join(f"{rl} {n}" for rl, n in d["sittings"].items())
+                  + f" (ban sittings with a ban line {d['ban_lines']})."]
+            for lv in dict.fromkeys(lv for r in names for lv in d["runs"][r]):
+                res = {r: d["runs"][r][lv] for r in names if lv in d["runs"][r]}
+                diff = {r: x[lv] for r, x in d["difference"].items() if lv in x}
+                ms = dict.fromkeys(m for r in res for m in res[r])
+                L += ["", f"### At {lv}", ""] + table(res, diff, base, "measure", [(m, LABEL[m], m) for m in ms])
+    c = j.get("creayun")
+    if c and c["runs"] and "test" in periods:
+        L += ["", "## Creayun's held-out lines", "",
+              f"{c['lines']:,} test_creayun lines in {c['files']} dossiers (server-days). They have no hold label, each "
+              "is a line Creayun's own filter flagged, and a line's context is the earlier flagged lines of its server "
+              "and day only. Thresholds are each run's own, set on the owner's validation lines. Lines per group: "
+              + ", ".join(f"{g} {n:,}" for g, n in c["groups"].items()) + "."]
+        keys = next(iter(c["runs"].values()))
+        for h in dict.fromkeys(k.split("|")[0] for k in keys if k.startswith("hold ")):
+            L += ["", f"### Blocked at {h.split()[1]} (model hold or input rejection)", ""]
+            L += table(c["runs"], c["difference"], base, "lines",
+                       [(f"{h}|{g}", f"{g} at 1" if g != "all-zero" else "all-zero unmasked", "share")
+                        for g in c["groups"]])
+            L += ["", "Model holds among covered lines:", ""]
+            L += table(c["runs"], c["difference"], base, "lines",
+                       [(f"model {h}|{g}", g, "share") for g in c["groups"]])
+        L += ["", "Coverage counts: " + "; ".join(f"{r}: {counts}" for r, counts in c["coverage"].items()), "",
+              "### Each kind's own output on covered lines, at its validation threshold", ""]
+        L += table(c["runs"], c["difference"], base, "lines",
+                   [(f"own|{k}", f"{k} at 1", "share") for k in KINDS]
+                   + [(f"own|all-zero:{k}", f"all-zero unmasked over the {k} threshold", "share") for k in KINDS])
+        L += ["", "Thresholds (logits):", ""]
+        L += [f"- {r}: " + ", ".join(f"{k} {v:.2f}" for k, v in th.items()) for r, th in c["thresholds"].items()]
+    for name, s in j["side"].items():
+        bs = list(next(iter(s["rows"].values()))["by_batch"])
+        L += ["", f"## Labels {name}: the training period's lines by hold label", "",
+              f"{s['labelled']:,} labelled training-period lines, {s['without_line']:,} of them not a judged line of "
+              "the batches.", "",
+              f"| lines | count | hold 1 | hold 0 | hold -1 | {' / '.join(bs)} |", "|---|---|---|---|---|---|"]
+        for k, r in s["rows"].items():
+            t = r["lines"] or 1
+            L.append(f"| {k} | {r['lines']} | " + " | ".join(f"{r[h]} ({100 * r[h] / t:.1f}%)" for h in ("1", "0", "-1"))
+                     + " | " + " / ".join(str(v) for v in r["by_batch"].values()) + " |")
+    return "\n".join(L) + "\n"
 
 
 def body(cfg, args):
-    name = args.model or cfg["eval"]["model"]
-    spec = cfg["models"][name]
-    every = model_sets(cfg, spec)
-    sets = args.set or [s for s in every if s not in ("train", "outside")]
-    if "gguf" not in spec:
-        raise SystemExit(f"[models.{name}] has no gguf; run `uv run export` first")
-    platt = spec.get("platt")
-    count = None
-    if spec["kind"] == "classifier":
-        if "tokenizer" not in spec:
-            raise SystemExit(f"[models.{name}] has no tokenizer; run `uv run export`")
-        from .classifier import base_model, token_count   # first: it puts the Hugging Face hub offline
-        from transformers import AutoTokenizer
-        count = token_count(AutoTokenizer.from_pretrained(base_model(cfg, spec["tokenizer"])))
-    folder = cfg.work / "eval" / name
-    folder.mkdir(parents=True, exist_ok=True)
-    gguf = cfg.path(spec["gguf"])
-    servers = []
-
-    def scorer(convs):
-        if not gguf.exists():
-            raise SystemExit(f"model file {gguf} does not exist" +
-                             ("; run `uv run export` first" if spec["kind"] == "classifier" else ""))
-        if spec["kind"] == "classifier":
-            yield from window_scores(cfg, gguf, count, folder / "llama.log", convs)
-            return
-        if not servers:
-            log.info("starting llama-server on %s", gguf.name)
-            servers.append(Server(cfg, gguf, folder / "server.log", "chat").__enter__())
-        chat = Scorer(cfg, spec, servers[0])
-        for conv in convs:
-            for k, it in conv:
-                yield k, it, chat(it["history"], it["speaker"], it["text"], it["channel"])
-
-    items = {}
-
-    def set_items(set_name):
-        if set_name not in items:
-            items[set_name] = items_of(cfg, set_name, count)
-        return items[set_name]
-
-    try:
-        for set_name in sets:
-            if set_name not in every:
-                raise SystemExit(f"{name} has no set {set_name!r}; its sets: {', '.join(every)}")
-            out = folder / f"{set_name}.jsonl"
-            score_set(name, set_name, scorer, set_items(set_name), out, set_inputs(cfg, spec, set_name, gguf))
-    finally:
-        for s in servers:
-            s.__exit__()
-    val = set_scores(cfg, name, "val")
-    cut = None
-    if val and not val[1]:
-        if name == "classifier":
-            fitted, metrics, lines = fit_platt(cfg, val[0])
-            platt = (fitted["a"], fitted["b"])
-            if list(platt) != list(spec.get("platt") or []):
-                write_classifier(cfg, spec["gguf"], spec["tokenizer"], platt)
-            for line in lines[-len(FPRS) - 1:]:
-                log.info("%s val: %s", name, line)
-        else:
-            metrics = val_metrics(cfg, val[0])[0]
-        cut = metrics["val"]["margin@fpr0.01"]
-    summary = [f"# {name}"]
-    current = {}
-    for set_name in every:
-        scores = set_scores(cfg, name, set_name)
-        if scores is None:
-            if (folder / f"{set_name}.jsonl").exists():
-                log.info("%s %s: scored from other inputs; left out of the summary until it is scored again", name,
-                         set_name)
+    e = cfg["eval"]
+    shares = [float(s) for s in e["holds"]]
+    runs = [load_run(cfg, name, shares) for name in args.runs]
+    if len({r["name"] for r in runs}) < len(runs):
+        raise SystemExit("two runs have the same name")
+    loaders = {"forward": forward_labels, "new": batch_labels}
+    sets = []
+    for name in args.labels or list(loaders):
+        if name not in loaders:
+            raise SystemExit(f"--labels: {name} is not a label set ({', '.join(loaders)})")
+        ls = loaders[name](cfg)
+        if ls is None:
+            if args.labels:
+                raise SystemExit(f"labels {name}: its files do not exist")
+            log.info("labels %s: not measured, its files do not exist", name)
             continue
-        rows, missing = scores
-        if missing:
-            summary += ["", f"## {set_name}", f"partly scored: {missing:,} of {missing + len(rows):,} messages have no "
-                        f"score; `uv run eval --model {name} --set {set_name}` scores them"]
-            log.info("%s %s: %s messages unscored; left out of the summary", name, set_name, f"{missing:,}")
-            continue
-        current[set_name] = rows
-        text = set_summary(cfg, set_name, rows, platt, cut)
-        summary += ["", f"## {set_name}", *text]
-        for k, line in enumerate(text):
-            shown = (" single" in line or "labelled offenders" in line) if set_name == "tf" else k < 2
-            log.log(20 if shown else 10, "%s %s: %s", name, set_name, line)
-    summary_path = folder / "summary.md"
-    write_text(summary_path, "\n".join(summary) + "\n")
-    log.info("full summary: %s", summary_path)
-
-    def alone(targets):
-        """{(set, key): margin} of each target message scored with no earlier lines."""
-        if spec["kind"] != "classifier" or not gguf.exists():
-            return {}
-        convs = [[(json.dumps([s, k], ensure_ascii=False), dict(it, history=[]))] for s, k, it in targets]
-        return {tuple(json.loads(key)): res["margin"]
-                for key, _, res in window_scores(cfg, gguf, count, folder / "alone.log", convs)}
-
-    from .failures import report
-    failures_path = folder / "failures.md"
-    write_text(failures_path, "\n".join(report(cfg, name, current, platt, cut, set_items, alone)) + "\n")
-    log.info("where it fails: %s", failures_path)
+        sets.append(ls)
+    if not sets:
+        raise SystemExit("no label set's files exist")
+    periods = ("val",) if args.validation else PERIODS
+    creayun = None if args.validation or all(r["creayun"] is None for r in runs) else creayun_lines(cfg)
+    out = evaluate(runs, sets, creayun, shares, float(e["kind_share"]), int(e["resamples"]), int(e["seed"]), periods)
+    j = plain(out, runs[0]["name"])
+    folder = cfg.path(e["out"]) / "+".join(r["name"] for r in runs)
+    write_text(folder / "eval.json", json.dumps(j, indent=1))
+    text = report(j, periods)
+    write_text(folder / "tables.md", text)
+    log.info("%s", text)
+    log.info("eval: %s", folder / "tables.md")
 
 
 def main():
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--model", help="a [models.*] entry in ecc.toml (default: [eval] model)")
-    ap.add_argument("--set", nargs="+", help="only these sets")
+    ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
+    ap.add_argument("runs", nargs="+", help="run folders: names under [export] out or [train] out, or paths; the "
+                                            "others are compared with the first")
+    ap.add_argument("--labels", nargs="+", help="the label sets to measure (forward, new; default: each that exists)")
+    ap.add_argument("--validation", action="store_true", help="the validation weeks only")
     run("eval", body, ap)
-

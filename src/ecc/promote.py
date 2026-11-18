@@ -1,18 +1,27 @@
 """uv run promote [VERSION]: make a bundle the one the model host serves, by moving the W&B production alias to it.
 
-VERSION is a bundle version (<work>/bundles/<version>); without it, the bundle the current configuration makes (what
-`uv run bundle` built last). The bundle must be uploaded already (`uv run bundle`). ECC-Server checks the alias on a
-schedule and at `ecc-server update`, downloads the new bundle, verifies it and swaps it in; moving the alias back to
-an earlier version rolls every host back the same way.
+VERSION is a bundle version (<work>/bundles/<version>); without it, the bundle `uv run bundle` built last. The bundle
+must be uploaded already (`uv run bundle`). ECC-Server checks the alias on a schedule and at `ecc-server update`,
+downloads the new bundle, verifies it and swaps it in; moving the alias back to an earlier version rolls every host
+back the same way.
 """
 import argparse
 
-from .bundle import planned, uploaded, wandb_api, wandb_path
+from .bundle import uploaded, wandb_api, wandb_path
 from .core import log, run
 
 
+def last_built(cfg):
+    """The version of the newest bundle folder in <work>/bundles."""
+    built = sorted((p.stat().st_mtime, p.parent.name) for p in (cfg.work / "bundles").glob("v4-*/manifest.json")
+                   if not p.parent.name.endswith(".tmp"))
+    if not built:
+        raise SystemExit(f"no bundle in {cfg.work / 'bundles'}; run `uv run bundle`")
+    return built[-1][1]
+
+
 def body(cfg, args):
-    version = args.version or planned(cfg)[0]
+    version = args.version or last_built(cfg)
     if not uploaded(cfg, version):
         raise SystemExit(f"W&B has no bundle {version}; run `uv run bundle` first")
     wandb = wandb_api(cfg)
@@ -38,5 +47,5 @@ def body(cfg, args):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument("version", nargs="?", help="the bundle version (default: the one the current configuration makes)")
+    ap.add_argument("version", nargs="?", help="the bundle version (default: the one `uv run bundle` built last)")
     run("promote", body, ap)

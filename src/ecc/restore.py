@@ -1,64 +1,76 @@
 """uv run restore: bring a backup made by `uv run backup` (ecc.backup) back from the ecc-data repository.
 
-Downloads need a read token of the repository (Telesphorepo: Settings > Tokens > New read token), given as
-TELESPHOREPO_USER and TELESPHOREPO_READ_TOKEN in .env or the environment.
+Downloads go through the telesphorepo CLI (`telesphorepo get`), which reads the private repository as the account
+this computer is logged in as (`telesphorepo login`); no token is stored.
 
-It restores the newest backup (latest.txt), or the folder named with --backup. Each bundle's SHA-256 is checked
-against the manifest before anything is written. A file already in the data folder with the same content is left as
-it is; when one differs, restore writes nothing and lists them, so it never overwrites newer work. Each written file
-is checked against its SHA-256 and gets its recorded modification time back, so every step that was current at the
-backup is current after it.
+It restores the newest backup (latest.txt), or the folder named with --backup. Its manifest names every archive of
+the data folder; each is downloaded from the backup folder that holds its bytes (its "folder", else the manifest's
+own folder). An archive uploaded in parts (ecc.backup.split) is joined from them, each part checked against its size
+and SHA-256. Each archive's SHA-256 is checked against the manifest before anything is written. A file already in the
+data folder with the same content is left as it is; when one differs, restore writes nothing and lists them, so it
+never overwrites newer work. Each written file is checked against its SHA-256 and gets its recorded modification time
+back, so every step that was current at the backup is current after it.
 
---check downloads and verifies the backup, then compares every file in it with the data folder, and writes nothing:
-the proof that a backup can bring the data back.
+--check downloads and verifies every archive the manifest names, wherever its bytes are, then compares every file in
+it with the data folder, and writes nothing: the proof that a backup can bring the data back.
 """
 import argparse
-import base64
 import json
 import os
 import shutil
 import tarfile
-import tomllib
-import urllib.request
 from pathlib import Path
 
-from .backup import sha256
-from .core import REPO, log, run
+from .backup import base_url, fetch, sha256, url
+from .core import log, run
 
 
-def fetch(url, auth, dest=None):
-    """The body of url, or with dest, the body streamed to that file."""
-    req = urllib.request.Request(url, headers={"Authorization": f"Basic {auth}"})
-    with urllib.request.urlopen(req, timeout=120) as r:
-        if dest is None:
-            return r.read()
-        with open(dest, "wb") as f:
-            while block := r.read(1 << 20):
-                f.write(block)
+def download(base, work, name, b):
+    """Downloads archive name from its backup folder b["folder"] into work and checks it: an archive in parts is
+    joined from them, each part checked against its SHA-256 first. Returns the number of parts (1 for an archive in
+    one file)."""
+    archive = work / name
+    parts = b.get("parts")
+    archive.parent.mkdir(parents=True, exist_ok=True)
+    if archive.exists() and sha256(archive) == b["sha256"]:
+        log.info("%s: already downloaded", name)
+    elif not parts:
+        log.info("downloading %s (%.1f MB) from %s", name, b["bytes"] / 1e6, b["folder"])
+        fetch(url(base, b["folder"], name), archive)
+    else:
+        log.info("downloading %s (%.1f MB) in %d parts from %s", name, b["bytes"] / 1e6, len(parts), b["folder"])
+        with open(archive, "wb") as joined:
+            for p in parts:
+                part = work / p["name"]
+                fetch(url(base, b["folder"], p["name"]), part)
+                if part.stat().st_size != p["bytes"] or sha256(part) != p["sha256"]:
+                    raise SystemExit(f"{b['folder']}/{p['name']}: size or SHA-256 differs from the manifest; the "
+                                     "download or the backup is damaged")
+                with open(part, "rb") as src:
+                    shutil.copyfileobj(src, joined, 1 << 24)
+                part.unlink()
+    if sha256(archive) != b["sha256"]:
+        raise SystemExit(f"{b['folder']}/{name}: SHA-256 differs from the manifest; the download or the backup is "
+                         "damaged")
+    return len(parts) if parts else 1
 
 
 def body(cfg, args):
-    cfg.load_env()
-    user, token = os.environ.get("TELESPHOREPO_USER"), os.environ.get("TELESPHOREPO_READ_TOKEN")
-    if not user or not token:
-        raise SystemExit("set TELESPHOREPO_USER and TELESPHOREPO_READ_TOKEN (a read token of ecc-data) in .env")
-    auth = base64.b64encode(f"{user}:{token}".encode()).decode()
-    project = tomllib.loads((REPO / "telesphorepo.toml").read_text(encoding="utf-8"))
-    base = f"{project['server'].rstrip('/')}/raw/{project['repo']}"
-    folder = args.backup or fetch(f"{base}/latest.txt", auth).decode().strip()
-    manifest = json.loads(fetch(f"{base}/{folder}/manifest.json", auth))
-    log.info("backup %s: %d bundles", folder, len(manifest["bundles"]))
+    base = base_url()
+    folder = args.backup or fetch(url(base, "latest.txt")).decode().strip()
+    manifest = json.loads(fetch(url(base, folder, "manifest.json")))
+    for b in manifest["bundles"].values():
+        b.setdefault("folder", folder)
+    folders = sorted({b["folder"] for b in manifest["bundles"].values()})
+    log.info("backup %s: %d archives, their bytes in %d backup folders: %s", folder, len(manifest["bundles"]),
+             len(folders), ", ".join(folders))
 
     work = cfg.work / "restore-download" / Path(folder).name
     work.mkdir(parents=True, exist_ok=True)
-    plan, conflicts, same = [], [], 0
+    plan, conflicts, same, stored = [], [], 0, 0
     for name, b in manifest["bundles"].items():
         archive = work / name
-        if not archive.exists() or sha256(archive) != b["sha256"]:
-            log.info("downloading %s (%.1f MB)", name, b["bytes"] / 1e6)
-            fetch(f"{base}/{folder}/{name}", auth, archive)
-        if sha256(archive) != b["sha256"]:
-            raise SystemExit(f"{name}: SHA-256 differs from the manifest; the download or the backup is damaged")
+        stored += download(base, work, name, b)
         for f in b["files"]:
             target = cfg.data / f["name"]
             if target.exists():
@@ -68,6 +80,8 @@ def body(cfg, args):
                     conflicts.append(f["name"])
                 continue
             plan.append((archive, f))
+    log.info("%d archives (%d files on the server, in %d backup folders) match the manifest's SHA-256",
+             len(manifest["bundles"]), stored, len(folders))
     log.info("%d files match the data folder, %d are missing, %d differ", same, len(plan), len(conflicts))
     if conflicts:
         log.warning("differing files (first 20): %s", ", ".join(conflicts[:20]))

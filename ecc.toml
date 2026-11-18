@@ -7,133 +7,182 @@
 # as {work}.
 data = "data"
 
-[ingest]
-# The folder that holds messages.parquet and state/ingest.json (`uv run ingest --folder` overrides it).
-folder = "{data}"
-# Sources, in the order new messages are appended. Every run reads every file again; messages are keyed by id, so a
-# file seen twice (a latest.log that rotated into a dated file) adds nothing. `path`: the source's folder of log files;
-# a new log file goes into it.
-# kind "paper": a Paper server's logs folder (YYYY-MM-DD-n.log.gz and latest.log). kind "discord": a folder of
-# DiscordChatExporter text exports whose names contain "flagged". `server`: the server the messages were said on;
-# Paper sources of one server are read as one log, and a discord source's messages are on "<server>/<Server field>".
-# `train`: whether the training set may use the source (the current Total Freedom logs are the real-chat test set).
-sources = [
-    { name = "tf", kind = "paper", path = "{data}/raw/tf", server = "tf", train = false },
-    { name = "creayun", kind = "discord", path = "{data}/raw/creayun", server = "creayun", train = true },
-    { name = "tf-old", kind = "paper", path = "{data}/raw/tf-old", server = "tf", train = true },
-]
-# Accounts seen only in minutes with at least this many messages (and 3 minutes around them) are raid bots.
-raid_messages_per_minute = 60
+# `dossier` builds a reader batch's parts from the raw chat, `read` has Codex read them, `truth` makes the line table.
+# A batch is a folder under `batches`: manifest.json, parts/, reads/<reader>/, truth.parquet and disputed.json.
+[dossier]
+batches = "{data}/v4/batches"
+logs = "{data}/raw"                     # a Paper batch's sources are log files under this folder (tf/<file>)
+record = "{data}/record/tf"             # ECC-Server's daily record: signs, books, item names, lines typed while muted
+messages = "{data}/v4/creayun-messages.parquet"  # a Creayun batch's lines; L<row> is a line's id
+exports = "{data}/raw/creayun"          # Creayun's exports, for the words players typed to authentication commands
+history = "{data}/label-history"        # where --rewrite keeps the parts and answers it replaces
 
-[candidates]
-before = 8          # lines of context before a risk-term hit
-after = 4           # lines after
-max_window = 60     # longer windows are split, overlapping by `before` lines
-shard_size = 50     # windows per Codex shard
-overlap = 0.05      # share of windows labelled twice in the first batch, to measure agreement
-
-[label]
+[read]
+questions = "{data}/v4/questions"
 model = "gpt-6.1-sol"
 effort = "medium"
-parallel = 8
-capacity_retries = 8    # "model is at capacity" answers are retried with backoff this many times
+tries = 3               # attempts per part before it is left for the next run
+timeout = 1800          # seconds per attempt
+stop_after = 8          # usage-limit answers in a row that end the run
+# A read is named <reader>-<copy> (codex4-a, codex4-b): every copy of a reader asks its question, a file in
+# `questions`. answer "marks": the seven kinds on every line of a part. answer "details": what each line the truth
+# table marks does, asked only of the parts that hold one. max_parallel caps --parallel.
+[read.readers.codex4]
+question = "question-v4.md"
+answer = "marks"
+max_parallel = 6
+[read.readers.codex5]
+question = "question-v5.md"
+answer = "details"
+max_parallel = 4
 
-[trainset]
-outside = 400000        # ok rows sampled from outside every candidate window
-val_percent = 5         # conversations (hashed) that go to validation
-# Folders of written conversations in case-file format (## <id> [<channel>], then label|speaker|text) that go to the
-# training split only; `train` keeps every labelled line of them, ok lines too.
-extra = ["{data}/synthetic"]
+[truth]
+tables = "{data}/v4/tables-reviewed-20261116"  # selected table versions; one folder per batch
+reads = ["codex4-a", "codex4-b"]        # the two reads every part needs
+third = "codex4-c"                      # the read of the disputed parts; where it answered, two of three decide
+allowlist = "{data}/v4/allowlist.txt"   # links on it are not off_server
+left_out = "{data}/v4/left-out.txt"     # spam texts whose lines are masked on every kind
+test_share = 0.15       # Creayun dossiers (by a hash of the name) whose lines are split test_creayun
+
+# The split of every Paper line (truth's `split`), the one period rule of training, thresholds and evaluation: a log
+# file of the `owner` batch is train before `val_from`, val before `test_from` and test from then on, by its date;
+# every other Paper batch is train.
+[periods]
+val_from = 2026-10-20
+test_from = 2026-10-28
+owner = "full"
+
+# `labels` builds the judge's cases for the hold labels from the batches' truth tables, rendered as the live judge is
+# shown a sitting (data/v4/bundle.toml [judge.render]), the sittings the owner ruled, and from them and the judge's
+# reads each batch's hold.parquet.
+[labels]
+batches = ["full", "old", "old2"]
+owner = ["telesphoreo"]                 # the owner's account: his own sittings are no case
+tags = "readers"                        # the case lines' tags: "readers" (their kinds and aim) or "none"
+cases = "{data}/v4/judge/cases-reviewed-20261116.json"    # the owner's ruled cases as the judge is shown them
+examples_until = "2026-10-27"           # the last log date of the examples; his later cases are measurement only
+answers = "{data}/v4/labels/reads-reviewed-20261116"      # a folder per read of the judge's answers, keyed by the case text's SHA-256
+reads = ["a", "b"]                      # the reads every case needs; agreeing reads rule its sitting, else split
+# The reads whose `by` on his rendered cases that are no case here (his examples) places an owner ban that names no
+# `by`; his cases here give it by `reads`. judgeB-a/b: the spike's validation reads of his 168 cases of 2026-11-13.
+by_reads = ["judgeB-a", "judgeB-b"]
+omitted_rulings = ["{data}/rulings/ecc-fresh.json"]  # never supplied; do not invent an owner ruling
+history = "{data}/label-history"        # a replaced hold.parquet is kept in hold-<the run's time>/<batch>/ here
+# The owner's rulings files, in order: the first that rules a sitting gives its ruling and `by`. `cases`: where each
+# entry's case lines are (the first file holding the case). take = "trusted" or "unsure": only the file's trusted
+# sittings, or the sittings it rules unsure; his unsure sittings of 2026-11-12 come after the files of his later
+# rulings, which rule some of them.
+[[labels.rulings]]
+file = "{data}/rulings/ecc-rulings-2026-11-12-train.json"
+take = "trusted"
+cases = ["{data}/rulings/rule-2026-11-12.html"]
+[[labels.rulings]]
+file = "{data}/rulings/final-reviewed-20261116.json"
+cases = ["{data}/v4/judge/cases-reviewed-20261116.json"]
+[[labels.rulings]]
+file = "{data}/rulings/ecc-rulings-2026-11-12-train.json"
+take = "unsure"
+cases = ["{data}/rulings/rule-2026-11-12.html"]
+[[labels.rulings]]
+file = "{data}/rulings/ecc-rulings-2026-11-12-train.json"
+cases = ["{data}/rulings/rule-2026-11-12.html"]
+[[labels.rulings]]
+file = "{data}/rulings/prior-reviewed-20261116.json"
+cases = ["{data}/v4/judge/cases-reviewed-20261116.json"]
 
 [train]
-model = "4b"          # the [train.models.*] entry `train` and `export` use; its run folder is <work>/models/<model>
-# Labelled lines from train.parquet: every ban row plus these ok rows, trained in the model host's windows of their
-# conversations (the other lines of a window are context only).
-neg_window = 110000     # ok rows inside labelled windows (hard negatives: near sexual talk but ok)
-neg_outside = 70000     # ok rows outside every window (ordinary chat)
-dup_cap = 5             # a normalised target text is kept at most this many times per label (spam floods)
-batch = 32              # labelled lines per step, about: a step holds whole windows
-lr = 2e-4               # AdamW; warmup over 5% of the labelled lines (at most 100 steps' worth), then cosine to 10%
-rank = 16               # LoRA rank on every linear layer; alpha is twice the rank, dropout 0.05
+ranker = "{data}/v4/models/C-s2"        # the trained C that ranks the training lines (input.json: its base, max_tokens)
+out = "{work}/train"                    # `trainset` writes the inputs to inputs/, rank.parquet, pick.parquet
+owner = ["full", "old", "old2"]         # the Paper batches: one table, every line taught hold and the kinds
+kinds_only = ["creayun"]                # batches whose lines teach the kinds only
+# The training lines: every train line of [periods] owner; of the other batches the marked lines, the top share of the
+# unmarked ones by the ranker's score and a random share of the rest.
+share = 0.10                            # the other Paper batches
+kinds_share = 0.05                      # the kinds-only batches
+seed = 20261113                         # the random shares' draws
+
+# The base models of C and of SH's line encoder: a Hugging Face repo at a commit sha, copied once into
+# data/models/base/<repo>@<revision>/ (`uv run python -m ecc.base fetch`); training reads the copy (ecc.base.path).
+[train.c]
+base = "Roblox/roblox-pii-classifier-v2"
+revision = "44a84be3eba4859a7e2a1f7b9cee8df61131f28b"
+files = ["config.json", "model.safetensors", "tokenizer.json", "special_tokens_map.json", "tokenizer_config.json",
+         "sentencepiece.bpe.model"]
+tokens = [256]                          # the serving length; preserve the complete current target
+# `train c`: AdamW with this lr and weight decay, a linear warm-up over `warmup` of the steps then a linear decay to 0,
+# gradients clipped to `clip`, `batch` lines a step, a fixed number of epochs and one seed. The teacher folds split the
+# Paper runs into `folds` with `fold_seed`.
+epochs = 3
+lr = 1.5e-5
+weight_decay = 0.01
+warmup = 0.06
+clip = 1.0
+batch = 32
+seed = 2
+folds = 2
+fold_seed = 20261113
+[train.sh]
+base = "intfloat/multilingual-e5-small"
+revision = "614241f622f53c4eeff9890bdc4f31cfecc418b3"
+files = ["config.json", "model.safetensors", "tokenizer.json"]
+# `train sh`: distilled at `temperature` from the teacher; AdamW at lr (e5-small), new_lr (the context layers and
+# embeddings) and head_lr (the head and final norm), warm-up then linear decay to 0 over `epochs`; batches of `batch`
+# lines in chunks of `chunk` consecutive lines of one log file. The epoch kept passes the most of the validation lines
+# the C run holds at bundle.toml's hold share `epoch_hold`; training stops `patience` epochs after it.
+layers = 4
+temperature = 2.0
+epochs = 30
+patience = 3
+batch = 512
+chunk = 16
+lr = 1e-4
+new_lr = 5e-4
+head_lr = 1e-3
+weight_decay = 0.01
+warmup = 0.06
+clip = 1.0
 seed = 1
-save_every = 500        # steps between checkpoints and in-training val AUROC
-val_n = 2000            # val rows scored at each checkpoint
-# token_budget: padded tokens per micro-batch; a step's windows are split into micro-batches of at most this many.
-# Measured on the 32 GB card: 1.7B without checkpointing peaks at 23 GiB reserved at 5120 (6144 reached 27 GiB);
-# 4B without checkpointing peaks at 25.5 GiB at 2304 (three 768-token windows; four pass 28 GiB), 0.94 s per step;
-# with checkpointing it peaks at 20.4 GiB at 24576 and takes 1.31 s.
-[train.models."1.7b"]
-base = "Qwen/Qwen3-1.7B-Base"
-token_budget = 5120
-grad_ckpt = false
-[train.models."4b"]
-base = "Qwen/Qwen3-4B-Base"
-token_budget = 2304
-grad_ckpt = false
+epoch_hold = "2pct"
+h = "{work}/spikes/gate/hold/models"    # H, the teacher of `train sh --teacher h`: a folder per model
 
+# `export` converts the completed C classifier and checks the real CPU graph against Torch.
 [export]
-converter = "{llama_src}/convert_hf_to_gguf.py"    # llama.cpp source checkout ([paths] llama_src in local.toml)
-imatrix = "{llama}/llama-imatrix.exe"
-quantize = "{llama}/llama-quantize.exe"
-merge_tolerance = 0.5   # largest margin change the merge may cause on training's 64 check prompts
-imatrix_prompts = 1000  # training-split prompts the importance matrix is computed from
-parity_prompts = 300    # val prompts scored by llama-server and PyTorch
-# llama-quantize type of the GGUF written to [models.classifier], made with the importance matrix and a Q8_0 token
-# embedding. Q5_K_M, or Q4_K_M for less CPU per message at more error.
-deploy = "Q5_K_M"
+c = "{work}/train/c-256"    # full C run; export requires its completed training records
+out = "{work}/export"       # one slot per C folder: models/, torch.parquet, thresholds.json, parity.json
+# Score every judged validation and test key, with each full causal run as context.
+batch = "full"          # the selected truth table; raw parts and manifests stay in [dossier] batches
+sample = 3000           # lines of the default parity run, every line within 0.01 of a threshold among them
 
-# Where `bundle` uploads classifier bundles (a private W&B project) and `promote` moves the production alias the
-# model host (ECC-Server) serves. The key is WANDB_API_KEY in .env.
+# `bundle` reads C-only graphs and calibrated thresholds from the export slot.
+# Read the unchanged judge settings and texts from `private` and owner rulings from `rulings`.
+[bundle]
+private = "{data}/v4"
+cases = "{data}/v4/judge/cases-reviewed-20261116.json"
+rulings = "{data}/rulings/final-reviewed-20261116.json"
+
+# `replay-export` writes the test weeks of [export] batch, with export's verdicts, and the judge's texts as
+# `ecc-server replay` reads them (chat text: the work folder only).
+[replay]
+out = "{work}/replay"
+owner = "telesphoreo"   # the owner's account: his own sittings are trusted, so the replay never judges them
+
+# Where `bundle` uploads bundles (a private W&B project) and `promote` moves the production alias the model host
+# (ECC-Server) serves. The key is WANDB_API_KEY in .env.
 [wandb]
 entity = "telesphoreo-telesphoreo"
 project = "ecc"
 artifact = "classifier-bundle"
 
-# Fast-check models scored by `eval`. kind "classifier": the fine-tuned single-token model (raw prompt, /completion).
-# kind "chat": a prompted instruct model (prompt file with ### system / ### user sections).
-[models.baseline]
-kind = "chat"
-gguf = "{models}/Qwen3-4B-Instruct-2507-Q4_K_M.gguf"
-prompt = "{data}/prompts/fast-v11.txt"
-history = 8
-
-# `export` writes gguf and tokenizer to data/classifier.toml, and `eval` adds the Platt parameters (platt). Its
-# history is the streaming window in src/ecc/chat.py (WINDOW_MIN).
-[models.classifier]
-kind = "classifier"
-
+# `eval` measures exported and trained C runs on the owner's validation and test weeks and on Creayun's held-out lines.
 [eval]
-model = "classifier"
-server = "{llama}/llama-server.exe"
-threads = 6
-# Conversation windows per llama.cpp decode when eval scores the classifier, and export's parity llama-server slots;
-# 1,024 tokens each, as deployed. On the RTX 5090 8 to 32 score equally fast: the decode is GPU-bound.
-slots = 16
-port = 18700
-thresholds = [0.5, 0.8, 0.9, 0.95, 0.99]
-# Case sets scored per model: folders of case files (label|speaker|text) and their expected roles (.json). The real
-# Total Freedom log ("tf"), "val" and the attacks set (data/cases/attacks/, built in code) are built in.
-[eval.sets]
-cases = ["{data}/cases/regression", "{data}/cases/real"]
-redteam = ["{data}/cases/redteam"]
-heldout = ["{data}/cases/heldout"]
-injection = ["{data}/cases/injection"]
-
-[review]
-model = "classifier"
-size = 500              # queue length
-sample_windows = 2000   # labelled windows whose training rows `uv run eval --set train` scores for the queue
-
-[redteam]
-model = "us.moonshotai.kimi-k3"
-workers = 6
-# The fast check: the model whose `uv run eval` case-set scores trigger, clear and corroborate. Its P(ban) thresholds
-# (trigger, clearing, corroboration) are private, in data/decision.toml, and the bundle carries them to the host.
-fast_model = "classifier"
-# Red-team sets: case-set folders, each with its expected roles beside its case files.
-[redteam.sets.redteam]
-cases = ["{data}/cases/redteam"]
-samples = 2                 # independent Kimi runs: redteam, redteam-run2
-[redteam.sets.regression]
-cases = ["{data}/cases/regression"]
-samples = 1
+out = "{work}/eval"
+# `forward` uses the frozen labels and timing. `new` checks hold.parquet against the resolved labels and uses the
+# supported ban timing from the current rulings and saved reads.
+forward = "{data}/v4/gate/actions-forward.parquet"
+forward_batches = { current = "full", old = "old", old2 = "old2" }
+batches = ["full", "old", "old2"]
+creayun = "creayun"             # the batch whose test_creayun lines are Creayun's held-out lines
+holds = [0.005, 0.01, 0.02]     # C alone holds these shares of its run's own validation lines
+kind_share = 0.01               # Creayun: each kind's own output at the score that flags this share of them
+resamples = 1000                # of the log files, for the intervals
+seed = 20261113

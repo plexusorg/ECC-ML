@@ -2,43 +2,38 @@
 name = "module-ecc"
 version = "0.1.0"
 description = "Data and model pipeline for Module-ECC chat safety"
-requires-python = ">=3.13"
-# No module imports gguf, protobuf or sentencepiece: llama.cpp's convert_hf_to_gguf.py, which `uv run export` runs in
-# this environment, needs them.
+requires-python = ">=3.13,<3.14"
+# openvino, tokenizers, torch and transformers are pinned: `uv run export` converts the models with them, and other
+# versions write other graphs.
 dependencies = [
-    "boto3>=1.43.123",
-    "gguf>=0.19.0",
     "numpy>=2.5.4",
+    "openvino==2026.4.1",
     "pandas>=3.1.0",
-    "peft==0.21.2",
-    "protobuf>=7.36.2",
     "pyarrow>=26.0.0",
     "python-dotenv>=1.2.4",
     "rich>=15.0.0",
     "safetensors>=0.8.0",
-    "scikit-learn>=1.9.1",
-    "sentencepiece>=0.2.2",
+    "tokenizers==0.23.3",
     "torch==2.14.1",
-    "transformers==5.22.1",
+    "transformers==5.22.2",
     "wandb>=0.31.0",
 ]
 
 [project.scripts]
 status = "ecc.status:main"
-ingest = "ecc.ingest:main"
-candidates = "ecc.candidates:main"
-label = "ecc.label:main"
-merge = "ecc.merge:main"
+dossier = "ecc.dossier:main"
+read = "ecc.read:main"
+truth = "ecc.truth:main"
+labels = "ecc.labels:main"
 trainset = "ecc.trainset:main"
 train = "ecc.train:main"
 export = "ecc.export:main"
 eval = "ecc.evaluate:main"
-review = "ecc.review:main"
-redteam = "ecc.redteam:main"
 backup = "ecc.backup:main"
 restore = "ecc.restore:main"
 bundle = "ecc.bundle:main"
 promote = "ecc.promote:main"
+replay-export = "ecc.replay:main"
 
 [[tool.uv.index]]
 name = "pytorch-cu130"
