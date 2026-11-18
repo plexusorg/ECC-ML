@@ -31,6 +31,15 @@ The labels are the most valuable thing the project has; everything else can be r
 Write a relabel as new outputs beside the old ones, never over them, and keep earlier merged versions in
 `data/label-history/`. Ask the owner before deleting anything in `data/` you did not create.
 
+## Testing
+
+- Unit tests are banned. Do not write or add them.
+- Use the smallest check that can catch a real regression. For routine edits to messages, documentation, or
+  configuration, review the diff and build only if the change calls for it. Do not start Minecraft or another
+  service just to check routine copy or settings changes.
+- Run focused end-to-end checks when a change affects behavior that lighter checks cannot verify. Stop when the
+  relevant checks pass. Repeat a check only to verify a fix or investigate a specific unresolved failure.
+
 ## Working rules
 
 - `data/policy.md` is the only rulebook; a rule changes only by the owner's ruling.
