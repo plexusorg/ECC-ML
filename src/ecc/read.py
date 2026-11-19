@@ -28,7 +28,7 @@ from pathlib import Path
 
 from . import transcript as T
 from .core import log, run, write_text
-from .line_labels import CATEGORIES
+from .line_labels import CATEGORIES, table_path
 
 LIMIT = re.compile(r"rate.?limit|usage limit|too many requests|429|at capacity|try again (in|later)", re.I)
 PERSONAL = {"age", "gender", "name", "school", "place", "other"}
@@ -200,7 +200,7 @@ def body(cfg, args):
     plan = pairs_by_part(cfg, folder, manifest) if details else None
     parts = [p for p in T.part_files(folder) if plan is None or p.stem in plan]
     if args.disputed:
-        dis = json.loads((folder / "disputed.json").read_text(encoding="utf-8"))
+        dis = json.loads((table_path(cfg, args.batch).parent / "disputed.json").read_text(encoding="utf-8"))
         parts = [p for p in parts if p.stem in dis["by_part"]]
     if args.parts:
         want = set(args.parts.split(","))
