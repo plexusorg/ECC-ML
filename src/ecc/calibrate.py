@@ -11,7 +11,7 @@ Named hold cuts on the classifier's hold logit:
   refuses a slot where it is not, because a classifier that must hold more chat than that to catch every offender is not
   shipped.
 
-Kind cuts are hints and never clear a hold.
+Category cuts are hints and never clear a hold.
 """
 import numpy as np
 
