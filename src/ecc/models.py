@@ -1,7 +1,7 @@
-"""The v4 model in torch, and scoring it in fp32.
+"""The classifier in torch, and scoring it in fp32.
 
-C: XLM-RoBERTa-large fine-tuned as a sequence classifier with eight outputs, a HuggingFace model folder. Inputs come
-from `ecc.inputs`.
+The classifier is XLM-RoBERTa-large fine-tuned as a sequence classifier with eight outputs, a HuggingFace model folder.
+Inputs come from `ecc.inputs`.
 """
 import functools
 import subprocess
@@ -14,11 +14,11 @@ from .inputs import OUTS, PAD
 
 @functools.cache
 def torch_modules():
-    """The torch modules, defined once per process: `Logits` for C."""
+    """The torch modules, defined once per process: `Logits`."""
     from torch import nn
 
     class Logits(nn.Module):
-        """C's logits alone, the graph's single output."""
+        """The classifier's logits alone, the graph's single output."""
 
         def __init__(self, m):
             super().__init__()
@@ -30,19 +30,20 @@ def torch_modules():
     return SimpleNamespace(Logits=Logits)
 
 
-def load_c(folder, device="cpu"):
-    """A trained C from its folder, in eval mode, fp32."""
+def load_classifier(folder, device="cpu"):
+    """A trained classifier from its folder, in eval mode, fp32."""
     import torch
     from transformers import XLMRobertaForSequenceClassification
-    c = XLMRobertaForSequenceClassification.from_pretrained(folder, dtype=torch.float32, attn_implementation="sdpa")
-    if c.config.num_labels != len(OUTS):
-        raise SystemExit(f"{folder}: {c.config.num_labels} outputs, not {len(OUTS)}")
-    return c.to(device).eval()
+    model = XLMRobertaForSequenceClassification.from_pretrained(folder, dtype=torch.float32,
+                                                                attn_implementation="sdpa")
+    if model.config.num_labels != len(OUTS):
+        raise SystemExit(f"{folder}: {model.config.num_labels} outputs, not {len(OUTS)}")
+    return model.to(device).eval()
 
 
-def c_logits(c):
-    """C wrapped to return its logits tensor alone."""
-    return torch_modules().Logits(c).eval()
+def classifier_logits(model):
+    """The classifier wrapped to return its logits tensor alone."""
+    return torch_modules().Logits(model).eval()
 
 
 def fp32():
@@ -63,8 +64,8 @@ def pad(seqs):
     return ids, mask
 
 
-def score_c(c, ids_list, device, tokens_per_batch=32768):
-    """C's logits [rows, 8] for each input id array, in length-sorted padded batches."""
+def score_classifier(model, ids_list, device, tokens_per_batch=32768):
+    """The classifier's logits [rows, 8] for each input id array, in length-sorted padded batches."""
     import torch
     z = np.zeros((len(ids_list), len(OUTS)), np.float32)
     order = np.argsort([len(x) for x in ids_list], kind="stable")
@@ -74,7 +75,7 @@ def score_c(c, ids_list, device, tokens_per_batch=32768):
             n = max(1, min(256, tokens_per_batch // len(ids_list[order[min(len(order) - 1, i + 255)]])))
             idx = order[i:i + n]
             ids, mask = (torch.from_numpy(x).to(device) for x in pad([ids_list[k] for k in idx]))
-            z[idx] = c(input_ids=ids, attention_mask=mask).logits.float().cpu().numpy()
+            z[idx] = model(input_ids=ids, attention_mask=mask).logits.float().cpu().numpy()
             i += n
     return z
 

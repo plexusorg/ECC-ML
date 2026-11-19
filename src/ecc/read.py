@@ -3,14 +3,14 @@
 Each part is sent once per reader, alone: `codex exec` in an ephemeral session with a read-only sandbox and an empty
 working folder (<work>/read/<batch>-<reader>/<part>), no user config and no rules, the prompt on stdin: the question,
 its answer format and, for a "details" question, the lines to describe, then the part. The answer is checked (JSON
-only, ids of the part, known kinds) and saved to BATCH/reads/READER/<part>.json; every attempt goes to
+only, ids of the part, known categories in each mark's `kind` field) and saved to BATCH/reads/READER/<part>.json; every attempt goes to
 BATCH/reads/READER/log.jsonl and an answer that fails the check to BATCH/reads/READER/invalid/. A run reads only the
-parts that have no answer yet, so it continues where the last one stopped. A part that fails `uv run dossier`'s check
+parts that have no answer yet, so it continues where the last one stopped. A part that fails `uv run transcript`'s check
 is never sent. After [read] stop_after usage-limit answers in a row the run starts no new attempt.
 
     uv run read full codex4-a --parallel 4      every part of full not yet answered by codex4-a
     uv run read full codex4-c --disputed        the parts full/disputed.json lists (the third read)
-    uv run read full codex5-a                   the second question, on the lines full/truth.parquet marks
+    uv run read full codex5-a                   the second question, on the lines full's line-label table marks
     uv run read full codex4-a --dry-run         write each prompt beside its working folder and show the command
 
 READER is <reader>-<copy>; the reader's question is the file [read.readers.<reader>] question names in [read]
@@ -26,9 +26,9 @@ import time
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
-from . import dossier as D
+from . import transcript as T
 from .core import log, run, write_text
-from .truth import KINDS
+from .line_labels import CATEGORIES
 
 LIMIT = re.compile(r"rate.?limit|usage limit|too many requests|429|at capacity|try again (in|later)", re.I)
 PERSONAL = {"age", "gender", "name", "school", "place", "other"}
@@ -73,7 +73,7 @@ def validate_marks(raw, part_text):
     for e in obj["lines"]:
         if not isinstance(e, dict) or e.get("id") not in ids:
             return None, f"line id not in part: {e}"
-        if e.get("kind") not in KINDS:
+        if e.get("kind") not in CATEGORIES:
             return None, f"bad kind: {e.get('kind')}"
         if not isinstance(e.get("speaker"), str):
             return None, "line without speaker"
@@ -122,29 +122,30 @@ def body_ids(text):
 
 
 def pairs_by_part(cfg, folder, manifest):
-    """{part stem: [(id, kind)]} for a "details" read, in the part's line order, kinds in KINDS order: every (line,
-    kind) at 1 in the batch's truth table, and every (line, kind) at -1 that a read marked with that kind. Each line is
+    """{part stem: [(id, category)]} for a "details" read, in the part's line order, categories in CATEGORIES order:
+    every (line, category) at 1 in the batch's line-label table, and every (line, category) at -1 that a read marked
+    with that category. Each line is
     asked with the part whose body holds it."""
     import pandas as pd
-    from .truth import table_path
+    from .line_labels import table_path
     path = table_path(cfg, folder.name)
     if not path.exists():
-        raise SystemExit(f"{path} does not exist; `uv run truth {folder.name}` builds it")
-    t = pd.read_parquet(path, columns=["dossier", "id", *KINDS, "read_a", "read_b", "read_c"])
-    t = t[(t[KINDS] != 0).any(axis=1)]
+        raise SystemExit(f"{path} does not exist; `uv run line-labels {folder.name}` builds it")
+    t = pd.read_parquet(path, columns=["transcript", "id", *CATEGORIES, "read_a", "read_b", "read_c"])
+    t = t[(t[CATEGORIES] != 0).any(axis=1)]
     want = {}
     for r in t.itertuples(index=False):
         read = set(r.read_a) | set(r.read_b) | (set(r.read_c) if r.read_c is not None else set())
-        ks = [k for k in KINDS if getattr(r, k) == 1 or (getattr(r, k) == -1 and k in read)]
+        ks = [k for k in CATEGORIES if getattr(r, k) == 1 or (getattr(r, k) == -1 and k in read)]
         if ks:
-            want[(r.dossier, r.id)] = ks
+            want[(r.transcript, r.id)] = ks
     out, placed = {}, 0
-    for d in manifest["dossiers"]:
+    for d in manifest["transcripts"]:
         for p in d["parts"]:
             ids = body_ids((folder / "parts" / p["file"]).read_text(encoding="utf-8"))
             if ids[0] != p["first"] or ids[-1] != p["last"]:
                 raise SystemExit(f"{p['file']}: body {ids[0]}..{ids[-1]} is not the manifest's {p['first']}..{p['last']}")
-            got = [(i, k) for i in ids for k in want.get((d["dossier"], i), [])]
+            got = [(i, k) for i in ids for k in want.get((d["transcript"], i), [])]
             placed += len({i for i, _ in got})
             if got:
                 out[p["file"][:-4]] = got
@@ -188,8 +189,8 @@ def usage_of(stdout):
 
 def body(cfg, args):
     r = cfg["read"]
-    folder = D.batch_dir(cfg, args.batch)
-    manifest = D.load_manifest(folder)
+    folder = T.batch_dir(cfg, args.batch)
+    manifest = T.load_manifest(folder)
     if manifest is None:
         raise SystemExit(f"{folder} has no manifest.json")
     q, head = question(cfg, args.reader)
@@ -197,7 +198,7 @@ def body(cfg, args):
     out_dir = args.out or folder / "reads" / args.reader
     details = q["answer"] == "details"
     plan = pairs_by_part(cfg, folder, manifest) if details else None
-    parts = [p for p in D.part_files(folder) if plan is None or p.stem in plan]
+    parts = [p for p in T.part_files(folder) if plan is None or p.stem in plan]
     if args.disputed:
         dis = json.loads((folder / "disputed.json").read_text(encoding="utf-8"))
         parts = [p for p in parts if p.stem in dis["by_part"]]
@@ -212,7 +213,7 @@ def body(cfg, args):
     exe = shutil.which("codex")
     if exe is None and not args.dry_run:
         raise SystemExit("the Codex CLI is not installed (codex)")
-    checker = D.Checker(cfg, manifest)
+    checker = T.Checker(cfg, manifest)
     runs = cfg.work / "read" / f"{args.batch}-{args.reader}"
     if not args.dry_run:
         (out_dir / "invalid").mkdir(parents=True, exist_ok=True)
@@ -300,7 +301,7 @@ def body(cfg, args):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    p.add_argument("batch", help="the batch: a folder under [dossier] batches")
+    p.add_argument("batch", help="the batch: a folder under [transcript] batches")
     p.add_argument("reader", help="the read's name, <question>-<copy> (codex4-a)")
     p.add_argument("--parallel", type=int, default=1, help="Codex sessions at a time (at most the question's "
                    "max_parallel)")

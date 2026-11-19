@@ -2,36 +2,38 @@
 Creayun's held-out lines, with intervals over resamples of the log files; each run after the first beside its
 difference from the first.
 
-A run is a folder of scores, named under [export] out (a system run) or [train] out (a C run), or given as a path (a
-name found in both is refused):
-- a system run, `export`'s folder of one C run: torch.parquet (dossier, id, period, c_<out> of every judged
-  validation and test line) and thresholds.json (hold_recall, hold_1pct, hold_2pct), refused unless thresholds.json was
-  set from that torch.parquet (the fingerprints both record). A line is held at a level when C's hold
-  logit reaches the level's threshold, as ECC-Server decides. Its levels are diagnostic 1%, diagnostic 2%, and recall.
-- a C run, a folder of `train c`: scores.parquet (dossier, id, period, c_<out> of every judged validation and test
-  line) and, when it has them, creayun.parquet (dossier, id, c_<out> of Creayun's test_creayun lines). C alone holds a
-  line when its hold logit reaches the score that holds each share of [eval] holds of the run's own validation lines.
+A run is a folder of scores, named under [export] out (an export slot) or [train] out (a training run), or given as
+a path (a name found in both is refused):
+- an export slot of one training run: torch.parquet (transcript, id, period, coverage, classifier_<out> of every
+  judged validation and test line) and thresholds.json (hold_recall, hold_1pct, hold_2pct), refused unless
+  thresholds.json was set from that torch.parquet (the fingerprints both record). A line is held at a level when the
+  classifier's hold logit reaches the level's threshold, as ECC-Server decides. Its levels are diagnostic 1%,
+  diagnostic 2%, and recall.
+- a training run, a folder of `train classifier`: scores.parquet (transcript, id, period, coverage, classifier_<out> of
+  every judged validation and test line) and, when it has them, creayun.parquet (the same of Creayun's test_creayun
+  lines). The run holds a line when its hold logit reaches the score that holds each share of [eval] holds of the
+  run's own validation lines.
 
-The labels. A label set gives each judged line a hold label (1 hold, 0 not held, -1 unknown), its sitting and the
-sitting's ruling and source. "forward" uses the frozen labels and ban timing from [eval] forward, with table names
+The labels. A label set gives each judged line a hold label (1 hold, 0 not held, -1 unknown), its session and the
+session's ruling and source. "forward" uses the frozen labels and ban timing from [eval] forward, with table names
 mapped to batches by [eval] forward_batches. "new" reads hold.parquet in each [eval] batches folder and resolves ban
-timing from the configured rulings and saved reads. It checks that the keys, hold labels and sitting fields still
-match the saved labels. The split, kinds, masks and line order come from each batch's truth.parquet. Measure each
-label set whose files exist, or name them with --labels. A scored line without a label counts only in the shares of
-lines held and passed.
+timing from the configured rulings and saved reads. It checks that the keys, hold labels and session fields still
+match the saved labels. The split, categories, masks and line order come from each batch's line-label table.
+Measure each label set whose files exist, or name them with --labels. A scored line without a label counts only in
+the shares of lines held.
 
 Measures per period (validation, test) and level, each a ratio of counts summed over the period's log files: recall of
-the hold = 1 lines, of those in owner-ruled sittings and of those with each kind at 1; the share of lines held (and,
-for a production run, scored by C); hold = 0 lines held per 1,000; the share of the marked hold = 0 lines held; active
-clean players touched (clean sittings of 20 or more lines with 1 or more, and 5 or more, lines held); the owner's ban,
-hold, nothing and not-ban sittings with a line held; and of his ban sittings with a ban line, those whose ban line is
+the hold = 1 lines, of those in owner-ruled sessions and of those with each category at 1; the share of lines
+blocked, held by the classifier and rejected before scoring; hold = 0 lines held per 1,000; the share of the marked hold = 0 lines held; active
+clean players touched (clean sessions of 20 or more lines with 1 or more, and 5 or more, lines held); the owner's ban,
+hold, nothing and not-ban sessions with a line held; and of his ban sessions with a ban line, those whose ban line is
 held and those with a line held by it. Creayun's held-out lines (no hold label; every one a line its own filter
-flagged), for runs that score them: the share of each kind's lines, of the lines with any kind and of the unmasked
-all-zero lines over each hold level's threshold, and over each kind's own output at the score that flags [eval]
-kind_share of the owner's validation lines. Beside them, per label set, the hold labels of the training period's lines
-with each kind at 1.
+flagged), for runs that score them: the share of each category's lines, of the lines with any category and of the
+unmasked all-zero lines over each hold level's threshold, and over each category's own output at the score that flags
+[eval] category_share of the owner's validation lines. Beside them, per label set, the hold labels of the training
+period's lines with each category at 1.
 
-Intervals: 95% over [eval] resamples resamples of the period's log files (Creayun: its dossiers, one server on one
+Intervals: 95% over [eval] resamples resamples of the period's log files (Creayun: its transcripts, one server on one
 day), drawn from [eval] seed, thresholds fixed. A difference between runs is paired on the same resamples; * marks one
 whose interval excludes 0.
 
@@ -45,13 +47,13 @@ from pathlib import Path
 import numpy as np
 
 from .core import log, run, write_text
-from .inputs import KINDS, OUTS
-from .truth import table_path
+from .inputs import CATEGORIES, OUTS
+from .line_labels import table_path
 
 PERIODS = ("val", "test")
 RULES = {"ban": "ban", "hold": "hold", "nothing": "nothing", "not ban": "notban"}
-CLEAN_LINES = 20        # a clean sitting of this many lines or more is an active clean player
-SUPERVISION = ["sitting", "sitting_ruling", "sitting_source", "hold"]
+CLEAN_LINES = 20        # a clean session of this many lines or more is an active clean player
+SUPERVISION = ["session", "session_ruling", "session_source", "hold"]
 LABELS = SUPERVISION + ["ban_here"]
 
 
@@ -68,59 +70,59 @@ def level(share):
 
 
 def check_scores(name, df, prefixes, period=True):
-    cols = ["dossier", "id", "coverage"] + (["period"] if period else []) + [f"{p}_{o}" for p in prefixes for o in OUTS]
+    cols = ["transcript", "id", "coverage"] + (["period"] if period else []) + [f"{p}_{o}" for p in prefixes for o in OUTS]
     missing = [c for c in cols if c not in df.columns]
     if missing:
         raise SystemExit(f"{name}: the scores lack the columns {', '.join(missing)}")
-    if df.duplicated(["dossier", "id"]).any():
+    if df.duplicated(["transcript", "id"]).any():
         raise SystemExit(f"{name}: a line is scored twice")
     if period and not df.period.isin(PERIODS).all():
         raise SystemExit(f"{name}: a scored line's period is neither val nor test")
-    if not df.coverage.isin(["c", "reject"]).all():
+    if not df.coverage.isin(["scored", "rejected"]).all():
         raise SystemExit(f"{name}: invalid coverage route")
-    if not np.isfinite(df.loc[df.coverage != "reject", [f"{p}_{o}" for p in prefixes for o in OUTS]].to_numpy()).all():
+    scored = df.coverage != "rejected"
+    if not np.isfinite(df.loc[scored, [f"{p}_{o}" for p in prefixes for o in OUTS]].to_numpy()).all():
         raise SystemExit(f"{name}: non-finite model score")
 
 
 def system_run(name, scores, thr):
-    """A production C-only run at validation diagnostic and recall thresholds."""
-    check_scores(name, scores, ("c",))
-    if thr.get("scoring", {}).get("mode") != "c_only" or not scores.coverage.isin(["c", "reject"]).all():
-        raise SystemExit(f"{name}: production evaluation requires explicit C-only scores")
-    return {"name": name, "kind": "c_only", "owner": scores.reset_index(drop=True), "creayun": None,
+    """An export slot at its validation diagnostic and recall thresholds."""
+    check_scores(name, scores, ("classifier",))
+    return {"name": name, "kind": "export", "owner": scores.reset_index(drop=True), "creayun": None,
             "thresholds": {"1%": float(thr["hold_1pct"]), "2%": float(thr["hold_2pct"]),
                            "recall": float(thr["hold_recall"])}}
 
 
-def c_run(name, scores, creayun, shares):
-    """A run of C alone: held at a level when C's hold logit reaches the score that holds the level's share of the
+def classifier_run(name, scores, creayun, shares):
+    """A training run: held at a level when the classifier's hold logit reaches the score that holds the level's share of the
     run's own validation lines."""
-    check_scores(name, scores, ("c",))
+    check_scores(name, scores, ("classifier",))
     if creayun is not None:
-        check_scores(name + " (Creayun)", creayun, ("c",), period=False)
-    val = scores.c_hold.to_numpy()[(scores.period.to_numpy() == "val") & (scores.coverage.to_numpy() != "reject")]
+        check_scores(name + " (Creayun)", creayun, ("classifier",), period=False)
+    val = scores.classifier_hold.to_numpy()[(scores.period.to_numpy() == "val") &
+                                            (scores.coverage.to_numpy() != "rejected")]
     if not len(val):
         raise SystemExit(f"{name}: no validation line is scored")
-    return {"name": name, "kind": "c", "owner": scores.reset_index(drop=True), "creayun": creayun,
+    return {"name": name, "kind": "train", "owner": scores.reset_index(drop=True), "creayun": creayun,
             "thresholds": dict(zip(map(level, shares), thresholds(val, shares)))}
 
 
 def held(r, df):
     """Return total blocks for each threshold. Report model holds and input rejects separately."""
-    z = df.c_hold.to_numpy()
+    z = df.classifier_hold.to_numpy()
     routes = df.coverage.to_numpy()
-    scored = routes != "reject"
-    return {lv: (routes == "reject") | (scored & (z >= th)) for lv, th in r["thresholds"].items()}, None
+    scored = routes != "rejected"
+    return {lv: (routes == "rejected") | (scored & (z >= th)) for lv, th in r["thresholds"].items()}
 
 
 def slot_thresholds(cfg, folder):
     """Use the shared production calibration guard for every evaluated export slot."""
     from .export import slot_thresholds as calibrated_thresholds
     thr = json.loads((folder / "thresholds.json").read_text(encoding="utf-8"))
-    model = thr.get("models", {}).get("c", {}).get("folder")
+    model = thr.get("models", {}).get("classifier", {}).get("folder")
     if not isinstance(model, str) or not model:
-        raise SystemExit(f"{folder}: thresholds do not identify their C model")
-    return calibrated_thresholds(cfg, {"c": Path(model), "out": folder, "models": folder / "models"})
+        raise SystemExit(f"{folder}: thresholds do not identify their classifier")
+    return calibrated_thresholds(cfg, {"classifier": Path(model), "out": folder, "models": folder / "models"})
 
 
 def load_run(cfg, name, shares):
@@ -132,44 +134,44 @@ def load_run(cfg, name, shares):
         if not found:
             raise SystemExit(f"{name}: no run of that name in {roots[0]} or {roots[1]}, and no such folder")
         if len(found) > 1:
-            raise SystemExit(f"{name} is both {found[0]} (the system run) and {found[1]} (C alone); give the path")
+            raise SystemExit(f"{name} is both {found[0]} (an export slot) and {found[1]} (a training run); give the path")
         folder = found[0]
     if (folder / "torch.parquet").exists():
         if not (folder / "thresholds.json").exists():
             raise SystemExit(f"{folder}: torch.parquet without thresholds.json")
         thr = slot_thresholds(cfg, folder)
         r = system_run(folder.name, pd.read_parquet(folder / "torch.parquet"), thr)
-        r["models"] = {"c": thr["models"]["c"]["folder"]}
+        r["models"] = {"classifier": thr["models"]["classifier"]["folder"]}
         return r
     if (folder / "scores.parquet").exists():
         cre = folder / "creayun.parquet"
-        r = c_run(folder.name, pd.read_parquet(folder / "scores.parquet"),
+        r = classifier_run(folder.name, pd.read_parquet(folder / "scores.parquet"),
                   pd.read_parquet(cre) if cre.exists() else None, shares)
-        r["models"] = {"c": folder.resolve().as_posix()}
+        r["models"] = {"classifier": folder.resolve().as_posix()}
         return r
-    raise SystemExit(f"{folder}: neither torch.parquet (a system run) nor scores.parquet (a C run)")
+    raise SystemExit(f"{folder}: neither torch.parquet (an export slot) nor scores.parquet (a training run)")
 
 
 # ---------------------------------------------------------------- labels
 
-def truth_lines(path, batch):
-    """The judged lines of a batch's truth table: dossier, id, batch, pos (the row in the table, the lines' order),
-    split, the seven kinds and masked (left out of the kind loss: an unsure line no read marked, a spam raid's, or -1 on
-    every kind)."""
+def labelled_lines(path, batch):
+    """The judged lines of a batch's line-label table: transcript, id, batch, pos (the row in the table, the lines' order),
+    split, the seven categories and masked (left out of the category loss: an unsure line no read marked, a spam raid's, or -1 on
+    every category)."""
     import pandas as pd
-    df = pd.read_parquet(path, columns=["dossier", "id", "judged", "split", "unsure_masked", "left_out"] + KINDS)
+    df = pd.read_parquet(path, columns=["transcript", "id", "judged", "split", "unsure_masked", "left_out"] + CATEGORIES)
     df["pos"] = np.arange(len(df))
-    df["masked"] = df.unsure_masked.to_numpy() | df.left_out.to_numpy() | (df[KINDS].to_numpy() == -1).all(1)
+    df["masked"] = df.unsure_masked.to_numpy() | df.left_out.to_numpy() | (df[CATEGORIES].to_numpy() == -1).all(1)
     df = df[df.judged.to_numpy()].drop(columns=["judged", "unsure_masked", "left_out"])
     df.insert(2, "batch", batch)
     return df.reset_index(drop=True)
 
 
 def label_set(name, labels, lines):
-    """A label set: labels (dossier, id, batch, period, sitting, sitting_ruling, sitting_source, hold, ban_here) and
-    lines (truth_lines of its batches, concatenated in batch order)."""
+    """A label set: labels (transcript, id, batch, period, session, session_ruling, session_source, hold, ban_here) and
+    lines (labelled_lines of its batches, concatenated in batch order)."""
     for what, df in (("labels", labels), ("lines", lines)):
-        if df.duplicated(["dossier", "id"]).any():
+        if df.duplicated(["transcript", "id"]).any():
             raise SystemExit(f"labels {name}: a line is in its {what} twice")
     return {"name": name, "labels": labels.reset_index(drop=True), "lines": lines.reset_index(drop=True),
             "batches": list(dict.fromkeys(lines.batch))}
@@ -182,13 +184,13 @@ def forward_labels(cfg):
     if not path.exists():
         return None
     names = e["forward_batches"]
-    x = pd.read_parquet(path, columns=["dossier", "id", "table", "period"] + LABELS)
+    x = pd.read_parquet(path, columns=["transcript", "id", "table", "period"] + LABELS)
     unknown = sorted(set(x.table) - set(names))
     if unknown:
         raise SystemExit(f"{path}: the tables {', '.join(unknown)} are not in [eval] forward_batches")
     x["batch"] = x.table.map(names)
-    lines = pd.concat([truth_lines(table_path(cfg, b), b) for b in dict.fromkeys(names.values())])
-    return label_set("forward", x[["dossier", "id", "batch", "period"] + LABELS], lines)
+    lines = pd.concat([labelled_lines(table_path(cfg, b), b) for b in dict.fromkeys(names.values())])
+    return label_set("forward", x[["transcript", "id", "batch", "period"] + LABELS], lines)
 
 
 def batch_labels(cfg):
@@ -196,7 +198,7 @@ def batch_labels(cfg):
     import pandas as pd
     from .labels import build_label_cases, resolve_labels
 
-    root = cfg.path(cfg["dossier"]["batches"])
+    root = cfg.path(cfg["transcript"]["batches"])
     paths = {b: root / b / "hold.parquet" for b in cfg["eval"]["batches"]}
     have = [b for b, p in paths.items() if p.exists()]
     if not have:
@@ -209,7 +211,7 @@ def batch_labels(cfg):
     tables, cases, owner, _, where = build_label_cases(cfg)
     resolved, _, _ = resolve_labels(cfg, paths, tables, cases, owner, where)
 
-    keys = ["dossier", "id"]
+    keys = ["transcript", "id"]
     frames = []
     for b, p in paths.items():
         saved = pd.read_parquet(p, columns=keys + SUPERVISION).set_index(keys)
@@ -225,20 +227,20 @@ def batch_labels(cfg):
             if not equal.fillna(False).all():
                 raise SystemExit(f"{p}: saved and resolved {field} values differ")
         frames.append(saved.assign(batch=b, ban_here=current.ban_here).reset_index())
-    lines = pd.concat([truth_lines(table_path(cfg, b), b) for b in paths])
+    lines = pd.concat([labelled_lines(table_path(cfg, b), b) for b in paths])
     labels = pd.concat(frames)
-    labels = labels.merge(lines[["dossier", "id", "split"]], on=["dossier", "id"], how="left", validate="1:1")
+    labels = labels.merge(lines[["transcript", "id", "split"]], on=["transcript", "id"], how="left", validate="1:1")
     if labels.split.isna().any():
         raise SystemExit(f"{int(labels.split.isna().sum())} lines of hold.parquet are no judged line of their batch")
     labels = labels.rename(columns={"split": "period"})
-    return label_set("new", labels[["dossier", "id", "batch", "period"] + LABELS], lines)
+    return label_set("new", labels[["transcript", "id", "batch", "period"] + LABELS], lines)
 
 
 def owner_lines(name, scores, ls, period):
-    """Every judged line of the requested period, with its scores, kinds, order and labels. Refuses incomplete scores,
+    """Every judged line of the requested period, with its scores, categories, order and labels. Refuses incomplete scores,
     including smoke runs, so every run uses the same lines and denominators."""
-    expected = ls["lines"].loc[ls["lines"].split == period, ["dossier", "id"]]
-    coverage = expected.merge(scores[["dossier", "id"]], on=["dossier", "id"], how="outer", validate="1:1",
+    expected = ls["lines"].loc[ls["lines"].split == period, ["transcript", "id"]]
+    coverage = expected.merge(scores[["transcript", "id"]], on=["transcript", "id"], how="outer", validate="1:1",
                               indicator=True)
     missing = int((coverage._merge == "left_only").sum())
     extra = int((coverage._merge == "right_only").sum())
@@ -246,12 +248,12 @@ def owner_lines(name, scores, ls, period):
         raise SystemExit(f"{name}: incomplete {period} scores for labels {ls['name']}: {missing:,} judged lines "
                          f"are not scored and {extra:,} scored lines are outside that period; score every judged "
                          "line before evaluation")
-    u = scores[["dossier", "id", "period", "coverage"]].merge(ls["lines"].drop(columns="split"), on=["dossier", "id"], how="left",
+    u = scores[["transcript", "id", "period", "coverage"]].merge(ls["lines"].drop(columns="split"), on=["transcript", "id"], how="left",
                                                   validate="1:1")
     if u.pos.isna().any():
         raise SystemExit(f"{name}: {int(u.pos.isna().sum())} scored lines are no judged line of the batches of labels "
                          f"{ls['name']} ({', '.join(ls['batches'])})")
-    u = u.merge(ls["labels"].drop(columns="batch").rename(columns={"period": "label_period"}), on=["dossier", "id"],
+    u = u.merge(ls["labels"].drop(columns="batch").rename(columns={"period": "label_period"}), on=["transcript", "id"],
                 how="left", validate="1:1")
     off = u.label_period.notna() & (u.label_period != u.period)
     if off.any():
@@ -262,60 +264,58 @@ def owner_lines(name, scores, ls, period):
 
 # ---------------------------------------------------------------- measures
 
-def owner_sittings(u):
-    """The owner's ruled sittings among the lines: dossier, ruling, lines, banpos (the ban line's place, ban sittings)."""
+def owner_sessions(u):
+    """The owner's ruled sessions among the lines: transcript, ruling, lines, banpos (the ban line's place, ban sessions)."""
     import pandas as pd
-    o = u[(u.sitting_source == "owner") & u.sitting_ruling.isin(list(RULES))]
-    g = o.groupby("sitting")
-    return pd.DataFrame({"dossier": g.dossier.first(), "ruling": g.sitting_ruling.first(), "lines": g.size(),
-                         "banpos": o[o.ban_here == 1].groupby("sitting").pos.min()})
+    o = u[(u.session_source == "owner") & u.session_ruling.isin(list(RULES))]
+    g = o.groupby("session")
+    return pd.DataFrame({"transcript": g.transcript.first(), "ruling": g.session_ruling.first(), "lines": g.size(),
+                         "banpos": o[o.ban_here == 1].groupby("session").pos.min()})
 
 
-def owner_measures(u, held, files, passed=None):
+def owner_measures(u, held, files):
     """Numerator and denominator per log file of every measure, for the lines u held where `held`."""
     import pandas as pd
-    f = pd.Categorical(u.dossier, categories=files).codes
+    f = pd.Categorical(u.transcript, categories=files).codes
 
     def lsum(x):
         return np.bincount(f, weights=np.asarray(x, float), minlength=len(files))
 
-    firm = (u[KINDS].to_numpy() == 1).any(1)
+    firm = (u[CATEGORIES].to_numpy() == 1).any(1)
     h = u.hold.to_numpy(float)
-    own = u.sitting_source.to_numpy() == "owner"
-    rejected = u.coverage.to_numpy() == "reject"
+    own = u.session_source.to_numpy() == "owner"
+    rejected = u.coverage.to_numpy() == "rejected"
     model = held & ~rejected
     total = lsum(np.ones(len(u)))
     M = {"blocked_share": (lsum(held), total), "model_held_share": (lsum(model), total),
          "rejected_share": (lsum(rejected), total)}
-    if passed is not None:
-        M["passed_share"] = (lsum(passed), lsum(np.ones(len(u))))
     M |= {"recall_all": (lsum(held & (h == 1)), lsum(h == 1)),
           "recall_model_all": (lsum(model & (h == 1)), lsum(h == 1)),
           "recall_model_covered": (lsum(model & (h == 1)), lsum((h == 1) & ~rejected)),
           "recall_owner": (lsum(held & (h == 1) & own), lsum((h == 1) & own)),
           "per1000_h0": (1000 * lsum(held & (h == 0)), lsum(h == 0)),
           "let_through_held": (lsum(held & firm & (h == 0)), lsum(firm & (h == 0)))}
-    for k in KINDS:
+    for k in CATEGORIES:
         pk = (h == 1) & (u[k].to_numpy() == 1)
-        M[f"kind_{k}"] = (lsum(held & pk), lsum(pk))
-        M[f"model_kind_{k}"] = (lsum(model & pk), lsum(pk & ~rejected))
-    clean = u.sitting_ruling.to_numpy() == "clean"
+        M[f"category_{k}"] = (lsum(held & pk), lsum(pk))
+        M[f"model_category_{k}"] = (lsum(model & pk), lsum(pk & ~rejected))
+    clean = u.session_ruling.to_numpy() == "clean"
     cl = u[clean].assign(held=held[clean])
-    cl = cl.groupby("sitting").agg(n=("id", "size"), held=("held", "sum"), dossier=("dossier", "first"))
+    cl = cl.groupby("session").agg(n=("id", "size"), held=("held", "sum"), transcript=("transcript", "first"))
     cl = cl[cl.n >= CLEAN_LINES]
-    fc = pd.Categorical(cl.dossier, categories=files).codes
+    fc = pd.Categorical(cl.transcript, categories=files).codes
     one = np.bincount(fc, minlength=len(files)).astype(float)
     M["clean20_any"] = (np.bincount(fc, weights=(cl.held >= 1).astype(float), minlength=len(files)), one)
     M["clean20_5"] = (np.bincount(fc, weights=(cl.held >= 5).astype(float), minlength=len(files)), one)
-    s = owner_sittings(u)
-    k = u.sitting.to_numpy()
+    s = owner_sessions(u)
+    k = u.session.to_numpy()
     inown = pd.Series(k).isin(s.index).to_numpy()
-    x = pd.DataFrame({"sitting": k[inown], "held": held[inown], "pos": u.pos.to_numpy()[inown]})
-    x["banpos"] = x.sitting.map(s.banpos)
-    anyh = x.groupby("sitting").held.any().reindex(s.index)
-    byh = x[x.pos == x.banpos].groupby("sitting").held.any().reindex(s.index, fill_value=False)
-    bob = x[x.pos <= x.banpos].groupby("sitting").held.any().reindex(s.index, fill_value=False)
-    fs = pd.Categorical(s.dossier, categories=files).codes
+    x = pd.DataFrame({"session": k[inown], "held": held[inown], "pos": u.pos.to_numpy()[inown]})
+    x["banpos"] = x.session.map(s.banpos)
+    anyh = x.groupby("session").held.any().reindex(s.index)
+    byh = x[x.pos == x.banpos].groupby("session").held.any().reindex(s.index, fill_value=False)
+    bob = x[x.pos <= x.banpos].groupby("session").held.any().reindex(s.index, fill_value=False)
+    fs = pd.Categorical(s.transcript, categories=files).codes
 
     def ssum(v):
         return np.bincount(fs, weights=np.asarray(v, float), minlength=len(files))
@@ -358,71 +358,71 @@ def difference(a, b):
 
 
 def evaluate_owner(runs, ls, periods, nb, seed):
-    """Per period: the files, lines, labels and owner's sittings it holds, and {run: {level: {measure: summary}}}."""
+    """Per period: the files, lines, labels and owner's sessions it holds, and {run: {level: {measure: summary}}}."""
     out = {}
     for p in periods:
         per, files = {}, None
         for r in runs:
             df = r["owner"][r["owner"].period.to_numpy() == p].reset_index(drop=True)
             u = owner_lines(r["name"], df, ls, p)
-            fs = sorted(u.dossier.unique())
+            fs = sorted(u.transcript.unique())
             if files is None:
                 files, W, first = fs, resamples(fs, nb, seed), u
             elif fs != files:
                 raise SystemExit(f"{r['name']} scores other {p} files than {runs[0]['name']}: runs are compared on the "
                                  "same files")
-            hl, passed = held(r, df)
-            per[r["name"]] = {lv: summarise(owner_measures(u, x, files, passed), W) for lv, x in hl.items()}
-        s = owner_sittings(first)
+            hl = held(r, df)
+            per[r["name"]] = {lv: summarise(owner_measures(u, x, files), W) for lv, x in hl.items()}
+        s = owner_sessions(first)
         out[p] = {"files": len(files), "lines": len(first),
                   "hold": {str(h): int((first.hold == h).sum()) for h in (1, 0, -1)},
                   "unlabelled": int(first.hold.isna().sum()),
-                  "sittings": {rl: int((s.ruling == rl).sum()) for rl in RULES},
+                  "sessions": {rl: int((s.ruling == rl).sum()) for rl in RULES},
                   "ban_lines": int(s.banpos.notna().sum()), "runs": per}
     return out
 
 
 def creayun_lines(cfg):
     b = cfg["eval"]["creayun"]
-    m = truth_lines(table_path(cfg, b), b)
+    m = labelled_lines(table_path(cfg, b), b)
     return m[m.split == "test_creayun"].reset_index(drop=True)
 
 
-def evaluate_creayun(runs, m, shares, kind_share, nb, seed):
-    """On Creayun's held-out lines m (truth_lines), for the runs that score them: {run: {measure: summary}}, and the
+def evaluate_creayun(runs, m, shares, category_share, nb, seed):
+    """On Creayun's held-out lines m (labelled_lines), for the runs that score them: {run: {measure: summary}}, and the
     thresholds, set on each run's owner's validation lines."""
     import pandas as pd
-    y = m[KINDS].to_numpy()
+    y = m[CATEGORIES].to_numpy()
     zero = ~m.masked.to_numpy() & (y == 0).all(1)
-    groups = {**{k: y[:, j] == 1 for j, k in enumerate(KINDS)}, "any kind": (y == 1).any(1), "all-zero": zero}
-    files = sorted(m.dossier.unique())
-    f = pd.Categorical(m.dossier, categories=files).codes
+    groups = {**{k: y[:, j] == 1 for j, k in enumerate(CATEGORIES)}, "any category": (y == 1).any(1), "all-zero": zero}
+    files = sorted(m.transcript.unique())
+    f = pd.Categorical(m.transcript, categories=files).codes
     W = resamples(files, nb, seed)
     res, thr, coverage = {}, {}, {}
     for r in runs:
         if r["creayun"] is None:
             continue
-        cre = m[["dossier", "id"]].merge(r["creayun"], on=["dossier", "id"], how="left", validate="1:1")
-        if cre.c_hold.isna().any():
-            raise SystemExit(f"{r['name']}: {int(cre.c_hold.isna().sum())} of Creayun's test_creayun lines are not "
+        cre = m[["transcript", "id"]].merge(r["creayun"], on=["transcript", "id"], how="left", validate="1:1")
+        if cre.classifier_hold.isna().any():
+            raise SystemExit(f"{r['name']}: {int(cre.classifier_hold.isna().sum())} of Creayun's test_creayun lines are not "
                              "scored")
-        val = r["owner"][(r["owner"].period == "val") & (r["owner"].coverage != "reject")]
-        th = dict(zip((f"hold {level(s)}" for s in shares), thresholds(val.c_hold.to_numpy(), shares)))
-        for k in KINDS:
-            th[f"{k} {level(kind_share)}"] = thresholds(val[f"c_{k}"].to_numpy(), (kind_share,))[0]
+        val = r["owner"][(r["owner"].period == "val") & (r["owner"].coverage != "rejected")]
+        th = dict(zip((f"hold {level(s)}" for s in shares), thresholds(val.classifier_hold.to_numpy(), shares)))
+        for k in CATEGORIES:
+            th[f"{k} {level(category_share)}"] = thresholds(val[f"classifier_{k}"].to_numpy(), (category_share,))[0]
         thr[r["name"]] = th
         coverage[r["name"]] = cre.coverage.value_counts().to_dict()
         M = {}
         for s in shares:
-            rejected = cre.coverage.to_numpy() == "reject"
-            model = ~rejected & (cre.c_hold.to_numpy() >= th[f"hold {level(s)}"])
+            rejected = cre.coverage.to_numpy() == "rejected"
+            model = ~rejected & (cre.classifier_hold.to_numpy() >= th[f"hold {level(s)}"])
             over = rejected | model
             for g, mask in groups.items():
                 M[f"hold {level(s)}|{g}"] = over & mask, mask
                 M[f"model hold {level(s)}|{g}"] = model & mask, mask & ~rejected
-        covered = cre.coverage.to_numpy() != "reject"
-        for k in KINDS:
-            over = cre[f"c_{k}"].to_numpy() >= th[f"{k} {level(kind_share)}"]
+        covered = cre.coverage.to_numpy() != "rejected"
+        for k in CATEGORIES:
+            over = cre[f"classifier_{k}"].to_numpy() >= th[f"{k} {level(category_share)}"]
             M[f"own|{k}"] = over & groups[k] & covered, groups[k] & covered
             M[f"own|all-zero:{k}"] = over & zero & covered, zero & covered
         M = {key: (np.bincount(f, weights=a.astype(float), minlength=len(files)),
@@ -433,13 +433,13 @@ def evaluate_creayun(runs, m, shares, kind_share, nb, seed):
 
 
 def side_table(ls):
-    """The training period's labelled lines with each kind at 1, and the unmasked all-zero ones, by hold label and
+    """The training period's labelled lines with each category at 1, and the unmasked all-zero ones, by hold label and
     batch."""
     x = ls["labels"][ls["labels"].period == "train"]
-    j = x.drop(columns="batch").merge(ls["lines"].drop(columns="split"), on=["dossier", "id"], how="inner",
+    j = x.drop(columns="batch").merge(ls["lines"].drop(columns="split"), on=["transcript", "id"], how="inner",
                                       validate="1:1")
-    y = j[KINDS].to_numpy()
-    sel = {**{k: y[:, i] == 1 for i, k in enumerate(KINDS)}, "any kind": (y == 1).any(1),
+    y = j[CATEGORIES].to_numpy()
+    sel = {**{k: y[:, i] == 1 for i, k in enumerate(CATEGORIES)}, "any category": (y == 1).any(1),
            "all-zero unmasked": ~j.masked.to_numpy() & (y == 0).all(1)}
     rows = {}
     for k, s in sel.items():
@@ -449,14 +449,14 @@ def side_table(ls):
     return {"labelled": len(x), "without_line": len(x) - len(j), "rows": rows}
 
 
-def evaluate(runs, sets, creayun, shares, kind_share, nb, seed, periods=PERIODS):
+def evaluate(runs, sets, creayun, shares, category_share, nb, seed, periods=PERIODS):
     """Everything eval measures: {runs, labels: {set: {period: ...}}, side: {set: ...}, creayun}, each measure a
     summary (point, resampled ratios, numerator, denominator)."""
     out = {"runs": {r["name"]: {"kind": r["kind"], "models": r["models"],
                                 "thresholds": r["thresholds"]} for r in runs},
            "labels": {ls["name"]: evaluate_owner(runs, ls, periods, nb, seed) for ls in sets},
            "side": {ls["name"]: side_table(ls) for ls in sets}}
-    out["creayun"] = evaluate_creayun(runs, creayun, shares, kind_share, nb, seed) if creayun is not None else None
+    out["creayun"] = evaluate_creayun(runs, creayun, shares, category_share, nb, seed) if creayun is not None else None
     return out
 
 
@@ -492,20 +492,20 @@ def plain(out, base):
 
 
 LABEL = {"blocked_share": "lines blocked % (model hold or input rejection)", "model_held_share": "lines held by model %",
-         "rejected_share": "lines rejected before model scoring %", "passed_share": "covered lines reaching C %",
+         "rejected_share": "lines rejected before model scoring %",
          "recall_all": "blocked recall, hold = 1 (model or input rejection)",
          "recall_model_all": "model recall, all hold = 1 lines",
          "recall_model_covered": "model recall, covered hold = 1 lines",
-         "recall_owner": "blocked recall, hold = 1 in owner-ruled sittings", "per1000_h0": "hold = 0 lines blocked per 1,000",
+         "recall_owner": "blocked recall, hold = 1 in owner-ruled sessions", "per1000_h0": "hold = 0 lines blocked per 1,000",
          "let_through_held": "marked lines with hold 0 held %",
-         "clean20_any": f"clean {CLEAN_LINES}+-line sittings with 1+ held %",
-         "clean20_5": f"clean {CLEAN_LINES}+-line sittings with 5+ held %",
-         "ban_any": "owner's ban sittings with 1+ line held", "hold_any": "owner's hold sittings with 1+ line held",
-         "nothing_any": "owner's nothing sittings with 1+ line held",
-         "notban_any": "owner's not-ban sittings with 1+ line held", "ban_by_held": "ban sittings: the ban line held",
-         "ban_by_or_before": "ban sittings: a line held by the ban line",
-         **{f"kind_{k}": f"blocked recall, hold = 1 lines with {k} at 1" for k in KINDS},
-         **{f"model_kind_{k}": f"model recall, covered hold = 1 lines with {k} at 1" for k in KINDS}}
+         "clean20_any": f"clean {CLEAN_LINES}+-line sessions with 1+ held %",
+         "clean20_5": f"clean {CLEAN_LINES}+-line sessions with 5+ held %",
+         "ban_any": "owner's ban sessions with 1+ line held", "hold_any": "owner's hold sessions with 1+ line held",
+         "nothing_any": "owner's nothing sessions with 1+ line held",
+         "notban_any": "owner's not-ban sessions with 1+ line held", "ban_by_held": "ban sessions: the ban line held",
+         "ban_by_or_before": "ban sessions: a line held by the ban line",
+         **{f"category_{k}": f"blocked recall, hold = 1 lines with {k} at 1" for k in CATEGORIES},
+         **{f"model_category_{k}": f"model recall, covered hold = 1 lines with {k} at 1" for k in CATEGORIES}}
 COUNT = {"ban_any", "hold_any", "nothing_any", "notban_any", "ban_by_held", "ban_by_or_before"}
 PER = {"per1000_h0"}
 
@@ -545,13 +545,13 @@ def report(j, periods):
     base, names = j["base"], list(j["runs"])
     L = [f"# eval: {', '.join(names)}", "",
          "Cells: the measure [95% interval over resamples of the period's log files, thresholds fixed] (lines or "
-         f"sittings counted / the denominator). Differences are from {base}, paired on the same resamples; * = the "
-         "interval excludes 0. Sitting counts show their interval as shares, their differences as counts with a pp "
+         f"sessions counted / the denominator). Differences are from {base}, paired on the same resamples; * = the "
+         "interval excludes 0. Session counts show their interval as shares, their differences as counts with a pp "
          "interval.", "", "## Runs", ""]
     for r, x in j["runs"].items():
         th = ", ".join(f"{lv} {v:.4f}" for lv, v in x["thresholds"].items())
         m = x["models"]
-        L.append(f"- {r}: C {m['c']}; hold thresholds {th}")
+        L.append(f"- {r}: classifier {m['classifier']}; hold thresholds {th}")
     for name, per in j["labels"].items():
         if "test" in per:
             gate = [f"{r} {s['num']:.0f} of {s['den']:.0f}" for r in names
@@ -566,9 +566,9 @@ def report(j, periods):
             L += ["", f"## Labels {name}: the {'validation' if p == 'val' else 'test'} weeks", "",
                   timing, "",
                   f"{d['files']} log files, {d['lines']:,} judged lines (hold = 1 {d['hold']['1']:,}, 0 "
-                  f"{d['hold']['0']:,}, -1 {d['hold']['-1']:,}, no label {d['unlabelled']:,}). The owner's sittings: "
-                  + ", ".join(f"{rl} {n}" for rl, n in d["sittings"].items())
-                  + f" (ban sittings with a ban line {d['ban_lines']})."]
+                  f"{d['hold']['0']:,}, -1 {d['hold']['-1']:,}, no label {d['unlabelled']:,}). The owner's sessions: "
+                  + ", ".join(f"{rl} {n}" for rl, n in d["sessions"].items())
+                  + f" (ban sessions with a ban line {d['ban_lines']})."]
             for lv in dict.fromkeys(lv for r in names for lv in d["runs"][r]):
                 res = {r: d["runs"][r][lv] for r in names if lv in d["runs"][r]}
                 diff = {r: x[lv] for r, x in d["difference"].items() if lv in x}
@@ -577,7 +577,7 @@ def report(j, periods):
     c = j.get("creayun")
     if c and c["runs"] and "test" in periods:
         L += ["", "## Creayun's held-out lines", "",
-              f"{c['lines']:,} test_creayun lines in {c['files']} dossiers (server-days). They have no hold label, each "
+              f"{c['lines']:,} test_creayun lines in {c['files']} transcripts (server-days). They have no hold label, each "
               "is a line Creayun's own filter flagged, and a line's context is the earlier flagged lines of its server "
               "and day only. Thresholds are each run's own, set on the owner's validation lines. Lines per group: "
               + ", ".join(f"{g} {n:,}" for g, n in c["groups"].items()) + "."]
@@ -591,10 +591,10 @@ def report(j, periods):
             L += table(c["runs"], c["difference"], base, "lines",
                        [(f"model {h}|{g}", g, "share") for g in c["groups"]])
         L += ["", "Coverage counts: " + "; ".join(f"{r}: {counts}" for r, counts in c["coverage"].items()), "",
-              "### Each kind's own output on covered lines, at its validation threshold", ""]
+              "### Each category's own output on covered lines, at its validation threshold", ""]
         L += table(c["runs"], c["difference"], base, "lines",
-                   [(f"own|{k}", f"{k} at 1", "share") for k in KINDS]
-                   + [(f"own|all-zero:{k}", f"all-zero unmasked over the {k} threshold", "share") for k in KINDS])
+                   [(f"own|{k}", f"{k} at 1", "share") for k in CATEGORIES]
+                   + [(f"own|all-zero:{k}", f"all-zero unmasked over the {k} threshold", "share") for k in CATEGORIES])
         L += ["", "Thresholds (logits):", ""]
         L += [f"- {r}: " + ", ".join(f"{k} {v:.2f}" for k, v in th.items()) for r, th in c["thresholds"].items()]
     for name, s in j["side"].items():
@@ -632,7 +632,7 @@ def body(cfg, args):
         raise SystemExit("no label set's files exist")
     periods = ("val",) if args.validation else PERIODS
     creayun = None if args.validation or all(r["creayun"] is None for r in runs) else creayun_lines(cfg)
-    out = evaluate(runs, sets, creayun, shares, float(e["kind_share"]), int(e["resamples"]), int(e["seed"]), periods)
+    out = evaluate(runs, sets, creayun, shares, float(e["category_share"]), int(e["resamples"]), int(e["seed"]), periods)
     j = plain(out, runs[0]["name"])
     folder = cfg.path(e["out"]) / "+".join(r["name"] for r in runs)
     write_text(folder / "eval.json", json.dumps(j, indent=1))

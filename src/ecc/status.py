@@ -7,8 +7,8 @@ from .core import console
 
 
 def export_row(cfg):
-    """The v4 export slot of [export] c: the graphs, torch.parquet and thresholds.json each current with what it was
-    made from, and the last parity run."""
+    """The export slot of [export] classifier: the graphs, torch.parquet and thresholds.json each current with what it
+    was made from, and the last parity run."""
     from .export import folders, slot_stale
     f = folders(cfg)
     if not (f["models"] / "graphs.json").exists():
@@ -34,11 +34,11 @@ def bundle_row(cfg):
 
 
 def batch_rows(cfg):
-    """One row per reader batch: its parts, each read's answers, and whether its truth table is newer than every
+    """One row per reader batch: its parts, each read's answers, and whether its line-label table is newer than every
     answer of the reads it is built from."""
-    from .dossier import load_manifest, part_files
-    from .truth import table_path
-    root = cfg.path(cfg["dossier"]["batches"])
+    from .transcript import load_manifest, part_files
+    from .line_labels import table_path
+    root = cfg.path(cfg["transcript"]["batches"])
     out = []
     for folder in sorted(p for p in root.iterdir() if p.is_dir()) if root.exists() else []:
         if load_manifest(folder) is None:
@@ -47,17 +47,17 @@ def batch_rows(cfg):
         reads, newest = [], 0
         for r in sorted(p for p in (folder / "reads").iterdir() if p.is_dir()) if (folder / "reads").exists() else []:
             answers = [p for p in r.glob("*.json") if p.stem in stems]
-            if r.name in (*cfg["truth"]["reads"], cfg["truth"]["third"]):
+            if r.name in (*cfg["line_labels"]["reads"], cfg["line_labels"]["third"]):
                 newest = max([newest] + [p.stat().st_mtime for p in answers])
             reads.append(f"{r.name} {len(answers)}")
-        truth = table_path(cfg, folder.name)
+        table = table_path(cfg, folder.name)
         detail = f"{len(stems)} parts; reads: {', '.join(reads) or 'none'}"
-        if not truth.exists():
+        if not table.exists():
             state = "[cyan]partly done[/]" if reads else "[dim]not started[/]"
-        elif truth.stat().st_mtime < newest:
-            state, detail = "[yellow]stale[/]", detail + "; an answer is newer than truth.parquet"
+        elif table.stat().st_mtime < newest:
+            state, detail = "[yellow]stale[/]", detail + "; an answer is newer than lines-labelled.parquet"
         else:
-            state, detail = "[green]done[/]", detail + "; truth.parquet"
+            state, detail = "[green]done[/]", detail + "; lines-labelled.parquet"
         out.append((f"batch {folder.name}", state, detail))
     return out
 

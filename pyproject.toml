@@ -21,9 +21,9 @@ dependencies = [
 
 [project.scripts]
 status = "ecc.status:main"
-dossier = "ecc.dossier:main"
+transcript = "ecc.transcript:main"
 read = "ecc.read:main"
-truth = "ecc.truth:main"
+line-labels = "ecc.line_labels:main"
 labels = "ecc.labels:main"
 trainset = "ecc.trainset:main"
 train = "ecc.train:main"

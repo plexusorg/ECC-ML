@@ -1,30 +1,33 @@
-"""uv run truth BATCH...: the line table of a reader batch, from its reads. Write under [truth] tables/BATCH, or a new
---out folder. Keep an identical existing table and refuse to replace a different one.
+"""uv run line-labels BATCH...: the line-label table of a reader batch (lines-labelled.parquet), from its reads.
+Write under [line_labels] tables/BATCH, or a new --out folder. Keep an identical existing table and refuse to replace
+a different one.
 
 One row per player line (chat, private messages, mail, /me, nicknames, guild, Discord relays, signs, books, item names,
-tags, lines typed while muted) with the seven kinds, the account its speaker resolved to, the sitting
-(`<dossier>|<account>`), up to 5 earlier lines of its conversation within 5 minutes, and the split. A Paper row also
-has its run (`dossier.runs`: the server uptime its log file belongs to; rows are in run order, each run's files in
-order) with `time` in seconds from the midnight of the run's first day, and what the plugin sends for the line: the
-raw text, the raw shown name (chat and Discord lines) and the copies folded into it (id, time, raw text, raw shown
-name). A Creayun row's run is its dossier; its rows are in dossier order, each dossier's parts by part number.
+tags, lines typed while muted) with the seven categories, the account its speaker resolved to, the session
+(`<transcript>|<account>`), up to 5 earlier lines of its conversation within 5 minutes, and the split. A server-log row
+also has its run (`transcript.runs`: the server uptime its log file belongs to; rows are in run order, each run's
+files in order) with `time` in seconds from the midnight of the run's first day, and what the plugin sends for the
+line: the raw text, the raw shown name (chat and Discord lines) and the copies folded into it (id, time, raw text, raw
+shown name). A Creayun row's run is its transcript; its rows are in transcript order, each transcript's parts by part
+number.
 
 The split ([periods]): a file of the owner batch is train before val_from, val before test_from and test from then
-on, by the date of the file; every line of any other Paper batch is train. A Creayun dossier is test_creayun when a
-hash of its name falls in [truth] test_share, else train.
+on, by the date of the file; every line of any other server-log batch is train. A Creayun transcript is test_creayun
+when a hash of its name falls in [line_labels] test_share, else train.
 
-Labels per kind, from reads a and b ([truth] reads): 1 when both marked the line, -1 when one did, 0 when neither. On a
-part the third read ([truth] third) answered, 1 with two of three, -1 with one, 0 with none. A line a read listed as
-unsure and no read marked is -1 on every kind (where the third read answered, only if it listed the line unsure too).
-off_server is then 0 on a line whose meaning-normalized links are all on the allowlist (off_server_raw keeps the
-value before). Normalize exactly once, as the model does. A line
-holding a text of the left-out list is -1 on every kind. disputed.json lists the parts, and the lines in them, that a
-third read should cover: every line still -1 on some kind outside the parts it answered, left-out lines excepted.
+Labels per category, from reads a and b ([line_labels] reads): 1 when both marked the line, -1 when one did, 0 when
+neither. On a part the third read ([line_labels] third) answered, 1 with two of three, -1 with one, 0 with none. A line
+a read listed as unsure and no read marked is -1 on every category (where the third read answered, only if it listed
+the line unsure too). off_server is then 0 on a line whose meaning-normalized links are all on the allowlist
+(off_server_raw keeps the value before). Normalize exactly once, as the model does. A line holding a text of the
+left-out list is -1 on every category. disputed.json lists the parts, and the lines in them, that a third read should
+cover: every line still -1 on some category outside the parts it answered, left-out lines excepted.
 
-A Paper batch is built once reads a and b have answered every part; its dossiers are rebuilt from the logs for each
-line's account, and the build stops unless every part is byte-identical to the part the reads read. A Creayun batch
-takes the parts both reads have answered; its rows are the lines of each part's body, labelled from that part's answers
-alone, with context from the part's own lines. Creayun has no account behind a name: the account is the shown name.
+A server-log batch is built once reads a and b have answered every part; its transcripts are rebuilt from the logs for
+each line's account, and the build stops unless every part is byte-identical to the part the reads read. A Creayun
+batch takes the parts both reads have answered; its rows are the lines of each part's body, labelled from that part's
+answers alone, with context from the part's own lines. Creayun has no account behind a name: the account is the shown
+name. A reader's answer names each mark's category in its `kind` field.
 """
 import argparse
 import collections
@@ -36,12 +39,12 @@ from datetime import date
 import re
 from pathlib import Path
 
-from . import dossier as D
+from . import transcript as T
 from . import inputs as I
 from .core import log, run, write_text
 from .model_text import normalize
 
-KINDS = ["ask_contact", "give_contact", "ask_personal", "give_personal", "off_server", "sexual", "romantic"]
+CATEGORIES = ["ask_contact", "give_contact", "ask_personal", "give_personal", "off_server", "sexual", "romantic"]
 PLAYER = {"chat", "guild", "msg", "mail", "me", "nick", "sign", "book", "item", "tag", "muted", "discord"}
 PUBLIC = {"chat", "guild", "me", "discord"}
 EVENT = re.compile(r"^([LR]\d+) (\d\d):(\d\d):(\d\d) (\S+) (.*)$")
@@ -58,17 +61,17 @@ def order_key(lid):
 
 def table_path(cfg, batch):
     """The selected version's table. Reader batches remain the source of its evidence."""
-    return cfg.path(cfg["truth"]["tables"]) / batch / "truth.parquet"
+    return cfg.path(cfg["line_labels"]["tables"]) / batch / "lines-labelled.parquet"
 
 
 def left_out(cfg):
-    lines = cfg.path(cfg["truth"]["left_out"]).read_text(encoding="utf-8").splitlines()
+    lines = cfg.path(cfg["line_labels"]["left_out"]).read_text(encoding="utf-8").splitlines()
     return [x.strip().lower() for x in lines if x.strip() and not x.startswith("#")]
 
 
 def allowlist(cfg):
     allow = []
-    for line in cfg.path(cfg["truth"]["allowlist"]).read_text(encoding="utf-8").splitlines():
+    for line in cfg.path(cfg["line_labels"]["allowlist"]).read_text(encoding="utf-8").splitlines():
         line = line.split("#", 1)[0].strip().lower()
         if line:
             host, _, prefix = line.partition("/")
@@ -82,7 +85,7 @@ def all_links_allowed(text, allow):
 
 
 def answer(folder, stem):
-    """(marks {id: kinds}, aims {id: [targets]}, unsure ids) of one answer file, or None when it is missing or not
+    """(marks {id: categories}, aims {id: [targets]}, unsure ids) of one answer file, or None when it is missing or not
     complete JSON (a file a running read is still writing)."""
     f = folder / f"{stem}.json"
     if not f.exists():
@@ -91,7 +94,7 @@ def answer(folder, stem):
         o = json.loads(f.read_text(encoding="utf-8"))
         marks, aims = collections.defaultdict(set), collections.defaultdict(list)
         for e in o["lines"]:
-            if e["kind"] in KINDS:
+            if e["kind"] in CATEGORIES:
                 marks[e["id"]].add(e["kind"])
                 aims[e["id"]].append(str(e.get("target", "")).strip())
         return marks, aims, {e["id"] for e in o["unsure"]}
@@ -100,7 +103,7 @@ def answer(folder, stem):
 
 
 def load_read(folder, stems):
-    """One read over a batch: ({(dossier, id): kinds}, {(dossier, id)} listed unsure, {(dossier, id): [aims]},
+    """One read over a batch: ({(transcript, id): categories}, {(transcript, id)} listed unsure, {(transcript, id): [aims]},
     stems answered). A line in two parts' overlap collects the marks of both."""
     marks, unsure, aims, answered = collections.defaultdict(set), set(), collections.defaultdict(list), set()
     for s in stems:
@@ -108,7 +111,7 @@ def load_read(folder, stems):
         if a is None:
             continue
         answered.add(s)
-        d = D.dossier_of(s)
+        d = T.transcript_of(s)
         for lid, ks in a[0].items():
             marks[(d, lid)] |= ks
         for lid, xs in a[1].items():
@@ -129,8 +132,8 @@ def aimed(answers):
 
 
 def label(row, ma, mb, mc, unsure_by, text, allow, skip):
-    """Adds the kinds and the masks to `row`; mc is None where the third read did not answer."""
-    for k in KINDS:
+    """Adds the categories and the masks to `row`; mc is None where the third read did not answer."""
+    for k in CATEGORIES:
         if mc is not None:
             n = (k in ma) + (k in mb) + (k in mc)
             row[k] = 1 if n >= 2 else -1 if n == 1 else 0
@@ -139,7 +142,7 @@ def label(row, ma, mb, mc, unsure_by, text, allow, skip):
     row["unsure_masked"] = False
     if not (ma or mb or mc) and unsure_by and (mc is None or "c" in unsure_by):
         row["unsure_masked"] = True
-        for k in KINDS:
+        for k in CATEGORIES:
             row[k] = -1
     row["off_server_raw"] = row["off_server"]
     row["allowlisted"] = all_links_allowed(text, allow)
@@ -147,7 +150,7 @@ def label(row, ma, mb, mc, unsure_by, text, allow, skip):
         row["off_server"] = 0
     row["left_out"] = any(x in text.lower() for x in skip)
     if row["left_out"]:
-        for k in KINDS:
+        for k in CATEGORIES:
             row[k] = -1
     row["read_a"], row["read_b"] = sorted(ma), sorted(mb)
     row["read_c"] = sorted(mc) if mc is not None else None
@@ -177,11 +180,11 @@ def context(lines, prev, sec, name=lambda x: x):
 
 
 def disputed(df, name, home):
-    """The parts a third read needs: lines still -1 on some kind outside the parts it answered, left-out lines
-    excepted. home(dossier, id) is the part whose body holds a line."""
-    open_ = df[(df[KINDS] == -1).any(axis=1) & df.read_c.isna() & ~df.left_out]
+    """The parts a third read needs: lines still -1 on some category outside the parts it answered, left-out lines
+    excepted. home(transcript, id) is the part whose body holds a line."""
+    open_ = df[(df[CATEGORIES] == -1).any(axis=1) & df.read_c.isna() & ~df.left_out]
     parts = collections.defaultdict(list)
-    for d, lid in zip(open_.dossier, open_.id):
+    for d, lid in zip(open_.transcript, open_.id):
         parts[home(d, lid)].append(lid)
     return dict(batch=name, lines=len(open_), one_read_lines=int((~open_.unsure_masked).sum()),
                 unsure_lines=int(open_.unsure_masked.sum()), parts=len(parts),
@@ -189,25 +192,25 @@ def disputed(df, name, home):
 
 
 def periods(cfg, name, manifest):
-    """{dossier: split} of a Paper batch ([periods]): the owner batch's files by their date (train before val_from,
+    """{transcript: split} of a server-log batch ([periods]): the owner batch's files by their date (train before val_from,
     val before test_from, test from then on); every file of any other batch is train."""
     p = cfg["periods"]
     if not isinstance(p["val_from"], date) or not isinstance(p["test_from"], date) or p["val_from"] >= p["test_from"]:
         raise SystemExit("[periods] needs the dates val_from before test_from")
     if name != p["owner"]:
-        return {m["dossier"]: "train" for m in manifest["dossiers"]}
+        return {m["transcript"]: "train" for m in manifest["transcripts"]}
     out = {}
-    for m in manifest["dossiers"]:
+    for m in manifest["transcripts"]:
         day = date.fromisoformat(m["day"])
-        out[m["dossier"]] = "test" if day >= p["test_from"] else "val" if day >= p["val_from"] else "train"
+        out[m["transcript"]] = "test" if day >= p["test_from"] else "val" if day >= p["val_from"] else "train"
     return out
 
 
-# ---------------------------------------------------------------- Paper batches
+# ---------------------------------------------------------------- server-log batches
 
-def paper_table(cfg, folder, manifest, stems):
+def server_log_table(cfg, folder, manifest, stems):
     import pandas as pd
-    t = cfg["truth"]
+    t = cfg["line_labels"]
     reads = {}
     for r in t["reads"]:
         rd = load_read(folder / "reads" / r, stems)
@@ -221,19 +224,19 @@ def paper_table(cfg, folder, manifest, stems):
         log.info("third read %s: %d of %d parts answered", t["third"], len(C[3]), len(stems))
     A, B = reads[t["reads"][0]], reads[t["reads"][1]]
 
-    # each line's account and what the plugin sends for it, from the dossiers rebuilt from the logs; the rebuild must
+    # each line's account and what the plugin sends for it, from the transcripts rebuilt from the logs; the rebuild must
     # be the parts the reads read, byte for byte
     accounts, raws, carried, n_parts = {}, {}, [], 0
-    for m, d in D.build_batch(cfg, manifest, folder):
+    for m, d in T.build_batch(cfg, manifest, folder):
         if d is None:
-            raise SystemExit(f"{m['dossier']} builds to no lines")
-        for name, text in D.built_parts(d).items():
+            raise SystemExit(f"{m['transcript']} builds to no lines")
+        for name, text in T.built_parts(d).items():
             n_parts += 1
             p = folder / "parts" / name
             if not p.exists():
                 raise SystemExit(f"{name}: the rebuild has a part the batch lacks")
-            if p.read_bytes() != D.part_bytes(text):
-                raise SystemExit(f"{name}: the rebuilt part differs from the part the reads read; `uv run dossier "
+            if p.read_bytes() != T.part_bytes(text):
+                raise SystemExit(f"{name}: the rebuilt part differs from the part the reads read; `uv run transcript "
                                  f"{folder.name} --rewrite NAME` writes the rebuilt parts")
         accounts.update({(d["stem"], lid): acct for lid, acct in zip(d["ids"], d["accounts"])})
         raws.update({(d["stem"], lid): r for lid, r in zip(d["ids"], d["raw"])})
@@ -245,23 +248,23 @@ def paper_table(cfg, folder, manifest, stems):
         raise SystemExit(f"the rebuild has {n_parts} parts, the batch {len(stems)}")
     log.info("parts: %d rebuilt from the logs, byte-identical to the parts the reads read", n_parts)
 
-    # each dossier's run (one server uptime over one or more log files) and its first second in the run's time, which
+    # each transcript's run (one server uptime over one or more log files) and its first second in the run's time, which
     # counts from the midnight of the run's first day
-    logs = cfg.path(cfg["dossier"]["logs"])
+    logs = cfg.path(cfg["transcript"]["logs"])
     run_of, order, offset = {}, {}, {}
-    for folder_name in sorted({m["source"].split("/")[0] for m in manifest["dossiers"]}):
-        for k, (f, r) in enumerate(D.runs(logs / folder_name).items()):
+    for folder_name in sorted({m["source"].split("/")[0] for m in manifest["transcripts"]}):
+        for k, (f, r) in enumerate(T.runs(logs / folder_name).items()):
             run_of[f"{folder_name}/{f}"], order[f"{folder_name}/{f}"] = r[:2], (folder_name, k)
-    for m in manifest["dossiers"]:
+    for m in manifest["transcripts"]:
         run, first_day = run_of[m["source"]]
-        offset[m["dossier"]] = (run, (date.fromisoformat(m["day"]) - date.fromisoformat(first_day)).days * 86400)
-    rank = {m["dossier"]: order[m["source"]] for m in manifest["dossiers"]}
+        offset[m["transcript"]] = (run, (date.fromisoformat(m["day"]) - date.fromisoformat(first_day)).days * 86400)
+    rank = {m["transcript"]: order[m["source"]] for m in manifest["transcripts"]}
 
     # the lines, each id once, in part order; the part whose body holds each
     by = collections.defaultdict(list)
     for s in stems:
-        by[D.dossier_of(s)].append((int(D.PART.match(s).group(2)), s))
-    dossiers, in_parts, home = {}, collections.defaultdict(set), {}
+        by[T.transcript_of(s)].append((int(T.PART.match(s).group(2)), s))
+    transcripts, in_parts, home = {}, collections.defaultdict(set), {}
     for d, ps in sorted(by.items(), key=lambda x: rank[x[0]]):      # each run's files in order
         seen, rows, day, last = set(), [], 0, None
         for _, s in sorted(ps):
@@ -282,16 +285,16 @@ def paper_table(cfg, folder, manifest, stems):
                 if last is not None and sec + day < last - 6 * 3600:   # past midnight
                     day += 86400
                 last = sec = sec + day
-                if parse_line(line):        # a player line: its fields as the dossier built them
+                if parse_line(line):        # a player line: its fields as the transcript built them
                     r = raws[(d, lid)]
                     base, _, partner = r["channel"].partition(">")
                     rows.append((lid, sec, base, partner, r["name"], r["text"], r["sent"]))
-        dossiers[d] = rows
+        transcripts[d] = rows
 
     side = periods(cfg, folder.name, manifest)
     allow, skip = allowlist(cfg), left_out(cfg)
     out = []
-    for d, lines in dossiers.items():
+    for d, lines in transcripts.items():
         public, private = [], collections.defaultdict(list)
         for i, (lid, sec, chan, partner, speaker, text, sent) in enumerate(lines):
             key = (d, lid)
@@ -306,9 +309,9 @@ def paper_table(cfg, folder, manifest, stems):
             mc = C[0].get(key, set()) if covered else None
             run, base = offset[d]
             raw = raws[key]
-            row = {"dossier": d, "run": run, "id": lid, "time": base + sec, "channel": chan, "partner": partner,
+            row = {"transcript": d, "run": run, "id": lid, "time": base + sec, "channel": chan, "partner": partner,
                    "speaker": speaker, "account": acct, "account_how": how,
-                   "sitting": f"{d}|{acct.lower()}" if acct else None, "text": text, "sent": sent,
+                   "session": f"{d}|{acct.lower()}" if acct else None, "text": text, "sent": sent,
                    "raw_text": raw["raw"], "raw_shown": raw["shown"],
                    "copies": [{"id": c, "time": base + sec + (cs - sec) % 86400, "raw_text": ct, "raw_shown": cn}
                               for c, cs, ct, cn in raw["copies"]],
@@ -331,7 +334,7 @@ def paper_table(cfg, folder, manifest, stems):
 
 def creayun_table(cfg, folder, manifest, stems):
     import pandas as pd
-    t = cfg["truth"]
+    t = cfg["line_labels"]
     ra_dir, rb_dir = (folder / "reads" / r for r in t["reads"])
     reads = {}
     for s in stems:
@@ -342,32 +345,32 @@ def creayun_table(cfg, folder, manifest, stems):
         raise SystemExit("no part has both answers")
     log.info("parts answered by both reads: %d of %d", len(reads), len(stems))
 
-    # the dossiers of the answered parts, rebuilt from the message table, must be the parts the reads read
-    units = {D.dossier_of(s) for s in reads}
-    entries = {m["dossier"]: m for m in manifest["dossiers"]}
-    built = D.creayun_dossiers(cfg, {(entries[u]["server"], entries[u]["day"]) for u in units})
+    # the transcripts of the answered parts, rebuilt from the message table, must be the parts the reads read
+    units = {T.transcript_of(s) for s in reads}
+    entries = {m["transcript"]: m for m in manifest["transcripts"]}
+    built = T.creayun_transcripts(cfg, {(entries[u]["server"], entries[u]["day"]) for u in units})
     missing = units - set(built)
     if missing:
-        raise SystemExit(f"{len(missing)} dossiers have no rows in the message table")
+        raise SystemExit(f"{len(missing)} transcripts have no rows in the message table")
     n = 0
     for u in sorted(units):
         d = built[u]
         if d["rows"] != entries[u]["rows"]:
             raise SystemExit(f"{u}: the rebuilt rows differ from the manifest")
-        parts = D.built_parts(d)
+        parts = T.built_parts(d)
         if list(parts) != [p["file"] for p in entries[u]["parts"]]:
             raise SystemExit(f"{u}: the rebuilt parts differ from the manifest's")
         for name, text in parts.items():
-            if (folder / "parts" / name).read_bytes() != D.part_bytes(text):
+            if (folder / "parts" / name).read_bytes() != T.part_bytes(text):
                 raise SystemExit(f"{name}: the rebuilt part differs from the part the reads read")
             n += 1
-    log.info("parts: %d dossiers (%d parts) rebuilt from the message table are byte-identical to the parts the reads "
+    log.info("parts: %d transcripts (%d parts) rebuilt from the message table are byte-identical to the parts the reads "
              "read", len(units), n)
 
     allow, skip = allowlist(cfg), left_out(cfg)
     rows = []
-    for s in sorted(reads, key=lambda s: (D.dossier_of(s), int(D.PART.match(s).group(2)))):     # part2 before part10
-        d = D.dossier_of(s)
+    for s in sorted(reads, key=lambda s: (T.transcript_of(s), int(T.PART.match(s).group(2)))):     # part2 before part10
+        d = T.transcript_of(s)
         server, day = entries[d]["server"], entries[d]["day"]
         body = (folder / "parts" / f"{s}.txt").read_text(encoding="utf-8").splitlines()
         marker = next((i for i, ln in enumerate(body) if ln.startswith("--- part ")), -1)
@@ -391,8 +394,8 @@ def creayun_table(cfg, folder, manifest, stems):
                 prev = public
             if in_body:
                 ma, mb = ma_all.get(lid, set()), mb_all.get(lid, set())
-                row = {"dossier": d, "run": d, "id": lid, "time": sec, "channel": chan, "partner": partner,
-                       "speaker": speaker, "account": acct, "account_how": "shown", "sitting": f"{d}|{acct}",
+                row = {"transcript": d, "run": d, "id": lid, "time": sec, "channel": chan, "partner": partner,
+                       "speaker": speaker, "account": acct, "account_how": "shown", "session": f"{d}|{acct}",
                        "text": text, "sent": sent, "judged": True, "train": True,
                        "context": context(lines, prev, sec, str)}
                 unsure_by = "".join(x for x, u in (("a", un_a), ("b", un_b)) if lid in u)
@@ -406,9 +409,9 @@ def creayun_table(cfg, folder, manifest, stems):
             else:
                 public.append(i)
     df = pd.DataFrame(rows)
-    if df.duplicated(["dossier", "id"]).any():
+    if df.duplicated(["transcript", "id"]).any():
         raise SystemExit("a line is in the body of two parts")
-    part_of = dict(zip(zip(df.dossier, df.id), df.part))
+    part_of = dict(zip(zip(df.transcript, df.id), df.part))
     return df, disputed(df, folder.name, lambda d, lid: part_of[(d, lid)])
 
 
@@ -438,30 +441,30 @@ def write_table(df, path):
 
 def body(cfg, args):
     for name in args.batch:
-        folder = D.batch_dir(cfg, name)
-        manifest = D.load_manifest(folder)
+        folder = T.batch_dir(cfg, name)
+        manifest = T.load_manifest(folder)
         if manifest is None:
             raise SystemExit(f"{folder} has no manifest.json")
-        stems = [p.stem for p in D.part_files(folder)]
-        build = creayun_table if manifest.get("kind") == "creayun" else paper_table
+        stems = [p.stem for p in T.part_files(folder)]
+        build = creayun_table if manifest.get("kind") == "creayun" else server_log_table
         df, dis = build(cfg, folder, manifest, stems)
         out = args.out / name if args.out else table_path(cfg, name).parent
         disputed_text = json.dumps(dis, indent=1)
         disputed_path = out / "disputed.json"
         if disputed_path.exists() and disputed_path.read_text(encoding="utf-8") != disputed_text:
             raise SystemExit(f"refuse to replace {disputed_path}; use --out with a new table folder")
-        write_table(df, out / "truth.parquet")
+        write_table(df, out / "lines-labelled.parquet")
         if not disputed_path.exists():
             write_text(disputed_path, disputed_text)
         t = df[df.judged]
-        log.info("%s: %d rows, %d dossiers, %d sittings, judged %d; with a kind at 1: %d, at -1: %d; disputed: %d "
-                 "parts, %d lines -> %s", name, len(df), df.dossier.nunique(), df.sitting.nunique(), len(t),
-                 int((t[KINDS] == 1).any(axis=1).sum()), int((t[KINDS] == -1).any(axis=1).sum()), dis["parts"],
+        log.info("%s: %d rows, %d transcripts, %d sessions, judged %d; with a category at 1: %d, at -1: %d; disputed: %d "
+                 "parts, %d lines -> %s", name, len(df), df.transcript.nunique(), df.session.nunique(), len(t),
+                 int((t[CATEGORIES] == 1).any(axis=1).sum()), int((t[CATEGORIES] == -1).any(axis=1).sum()), dis["parts"],
                  dis["lines"], out)
 
 
 def main():
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    p.add_argument("batch", nargs="+", help="batches: folders under [dossier] batches")
-    p.add_argument("--out", type=Path, help="write each table to a new OUT/<batch>/ instead of [truth] tables")
-    run("truth", body, p)
+    p.add_argument("batch", nargs="+", help="batches: folders under [transcript] batches")
+    p.add_argument("--out", type=Path, help="write each table to a new OUT/<batch>/ instead of [line_labels] tables")
+    run("line-labels", body, p)

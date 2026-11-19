@@ -1,12 +1,10 @@
-"""Build, verify and optionally upload the explicit C-only serving bundle.
+"""Build, verify and optionally upload the serving bundle.
 
-Read the completed C export slot. Ship only graph c and tokenizer c. Preserve
-the current judge settings and texts. Read calibrated thresholds from the slot;
-keep owner data unchanged. Default to validation recall. The bundle records
-exact input rules, their hash, outputs, kinds, thresholds and source provenance.
-Build owned file copies in unique staging and verify the complete manifest.
-Check the independent reference, real wire vectors and real CPU graph logits.
-Use --no-upload to build and check without contacting the artifact service.
+Read the completed export slot. Ship the classifier's graph and tokenizer. Preserve the current judge settings and
+texts. Read calibrated thresholds from the slot; keep owner data unchanged. Default to validation recall. The bundle
+records exact input rules, their hash, outputs, categories, thresholds and source provenance. Build owned file copies
+in unique staging and verify the complete manifest. Check the independent reference, real wire vectors and real CPU
+graph logits. Use --no-upload to build and check without contacting the artifact service.
 """
 import os
 
@@ -29,8 +27,8 @@ import numpy as np  # noqa: E402
 from . import inputs as I  # noqa: E402
 from .backup import sha256  # noqa: E402
 from .core import is_current, log, made_from, progress, run, write_text  # noqa: E402
-from .export import (C_TOLERANCE, COMPILE, GRAPHS, c_run, folders, lines_path, load_lines, model_inputs,  # noqa: E402
-                     graphs_made_from, pair, slot_thresholds)
+from .export import (CPU_TOLERANCE, COMPILE, GRAPHS, classifier_run, folders, lines_path,  # noqa: E402
+                     load_lines, model_inputs, graphs_made_from, pair, slot_thresholds)
 
 HEADER = "## C<n>: ruling: <ruling>"        # ECC-Server core.ExampleHeader
 FENCE = "~~~~~~"
@@ -62,9 +60,9 @@ EXAMPLE = [
 
 
 def training_rows(lines):
-    """The training code's table rows for wire lines of one stream: each line's text prepared as the dossier prepares
-    it, an empty one dropped and a copy folded as the dossier folds them. Returns (rows, dropped ids, folded ids)."""
-    from . import dossier as D
+    """The training code's table rows for wire lines of one stream: each line's text prepared as the transcript build
+    prepares it, an empty one dropped and a copy folded as the transcript build folds them. Returns (rows, dropped ids, folded ids)."""
+    from . import transcript as T
     rows, dropped, folded, last = [], [], [], {}
     for e in lines:
         ch, acct = e["channel"], e["speaker"]
@@ -76,13 +74,13 @@ def training_rows(lines):
             name_pre = I.discord_name(acct)
             account, shown = "", I.redact(name_pre)[0]
         elif ch == "chat":
-            name_pre = D.who(e["shown"], acct)
+            name_pre = T.who(e["shown"], acct)
             account, shown = acct, I.redact(name_pre)[0].split("=", 1)[0]
         else:
             name_pre = account = shown = acct
         tag = f"{ch}>{e['target']}" if ch in ("msg", "mail") or (ch == "nick" and e["target"]) else ch
         key = (name_pre.lower(), tag, pre)
-        if key in last and e["time"] - last[key] <= D.FOLD_SECONDS:
+        if key in last and e["time"] - last[key] <= T.FOLD_SECONDS:
             last[key] = e["time"]
             folded.append(e["id"])
             continue
@@ -159,43 +157,43 @@ def judge_texts(cfg):
 
 # ---------------------------------------------------------------- bundle.json
 
-def c_example(model_folder, max_tokens):
-    """Build actual C example inputs and CPU logits without certifying a release."""
+def worked_example(model_folder, max_tokens):
+    """Build actual example inputs and CPU logits without certifying a release."""
     import pandas as pd
     import torch
-    from .models import load_c, score_c
+    from .models import load_classifier, score_classifier
     from .coverage import contexts
     torch.set_num_threads(6)
     rows, dropped, folded = training_rows(EXAMPLE)
-    df = pd.DataFrame(rows).assign(dossier="example", run="example")
+    df = pd.DataFrame(rows).assign(transcript="example", run="example")
     df["text"] = [I.model_text(t, [], "") for t in df.text]
-    ctok = I.CInputs(Path(model_folder) / "tokenizer.json")
+    ctok = I.ClassifierInputs(Path(model_folder) / "tokenizer.json")
     n = max_tokens
     ctx, routes = contexts(df, ctok.tok, n)
-    scored = [i for i in range(len(df)) if df.judged[i] and routes[i] == "c"]
+    scored = [i for i in range(len(df)) if df.judged[i] and routes[i] == "scored"]
     rend = I.render(df, ctx, scored)
     cin = ctok.build(rend, n)
-    zc = score_c(load_c(model_folder), cin, torch.device("cpu"))
-    return {"note": "Invented wire lines. C inputs use the training builder; logits use real Torch fp32 on CPU.",
+    zc = score_classifier(load_classifier(model_folder), cin, torch.device("cpu"))
+    return {"note": "Invented wire lines. The inputs use the training builder; logits use real Torch fp32 on CPU.",
             "input": [{k: v for k, v in e.items() if v is not None} for e in EXAMPLE],
-            "dropped": dropped, "folded": folded, "rejected": df.id[routes == "reject"].tolist(),
+            "dropped": dropped, "folded": folded, "rejected": df.id[routes == "rejected"].tolist(),
             "prepared": dict(zip(df.id, df.text)),
             "scored": [{"id": df.id[i], "context": [df.id[j] for j in ctx[i]],
-                        "c": {"context_strings": rend[r][0], "target_string": rend[r][1],
+                        "classifier": {"context_strings": rend[r][0], "target_string": rend[r][1],
                               "input_ids": cin[r].tolist(), "logits_torch_fp32": zc[r].astype(float).tolist()}}
                        for r, i in enumerate(scored)]}
 
 
 def example(cfg):
-    """The verified C run's exact worked example."""
+    """The verified training run's exact worked example."""
     f = folders(cfg)
-    return c_example(f["c"], c_run(f["c"])["max_tokens"])
+    return worked_example(f["classifier"], classifier_run(f["classifier"])["max_tokens"])
 
 
 def text_rules():
-    """bundle.json `text`: how ECC-Server prepares a line's raw text and names, as the dossier prepared the training
-    text (ecc.inputs)."""
-    from .dossier import FOLD_SECONDS
+    """bundle.json `text`: how ECC-Server prepares a line's raw text and names, as the transcript build prepared the
+    training text (ecc.inputs)."""
+    from .transcript import FOLD_SECONDS
     lim = ", ".join(f"{k} {v}" for k, v in I.LIMITS.items())
     return {
         "rule": "ECC-Server prepares each line's raw text on arrival, before the repeat key; the scorer (after the link "
@@ -260,13 +258,45 @@ def links_rules(canonical):
                 "record keep the link."}
 
 
+def context_rules():
+    """bundle.json `context`: how ECC-Server picks a line's context."""
+    return {
+        "lines": I.CTX_LINES, "seconds": I.CTX_SECONDS,
+        "public_channels": sorted(I.PUBLIC), "placed_channels": sorted(I.PLACED), "private_channel": I.PRIVATE,
+        "author_key": "the account name lowercased; a Discord relay line (no account) is 'discord:' + the "
+                      "prepared Discord name lowercased",
+        "partner_key": "a private message's addressee, its account name lowercased",
+        "time": "whole seconds",
+        "rule": f"Per stream, in arrival order. A private message (msg) takes the earlier private messages between "
+                f"the same two keys (either direction); a placed line (sign, book, item, tag, nick) the same "
+                f"author's earlier placed lines (any placed channel); every other line the earlier public lines. "
+                f"Of that list take the last {I.CTX_LINES}, then keep those with time(line) - time(earlier) <= "
+                f"{I.CTX_SECONDS}. After a line is handled it is appended: a msg to its pair's list, a placed line "
+                f"to its author's list, a public-channel line (chat, guild, me, discord) to the public list. Any "
+                f"other channel (muted, mail, ...) takes public context but is appended nowhere."}
+
+
+def classifier_rules(max_tokens):
+    """bundle.json `classifier`: the classifier's input and how it is scored."""
+    return {
+        "max_tokens": max_tokens,
+        "roles": "names = {author(target): 't'}; walking context lines oldest first then the target: the speaker "
+                 "is named first, then (msg) the partner; a new key gets 's' + len(names) (s1, s2, ...)",
+        "line_string": "tag + role(author) + ': ' + text; tag = '' for chat, '[msg to ' + role(partner) + '] ' for "
+                       "msg, '[' + channel + '] ' otherwise",
+        "input_ids": "body = for each context string: ids + [2]; then [2] + ids(target string) + [2]; "
+                     "input = [0] + last classifier.max_tokens - 1 ids of body (cut from the left, mid-line if "
+                     "need be)",
+        "score": f"classifier(input_ids [1, T], attention_mask ones [1, T]) -> logits [1, 8]; the hold logit is "
+                 f"index {I.HOLD}"}
+
+
 # The rules ECC-Server implements in code, by their place in bundle.json: their hash is bundle.json `rules.sha256`.
-RULES = ["context.rule", "c.roles",
-         "c.line_string", "c.input_ids", "channels", "text.rule", "text.whitespace", "text.patterns.section",
-         "text.patterns.codes", "text.patterns.url", "text.patterns.ipv4", "text.patterns.ipv6",
-         "text.patterns.not_secure", "text.patterns.icons", "text.patterns.discord_tags", "text.shown",
-         "text.discord_name", "text.names", "text.repeat", "links.pattern", "links.rule", "coverage.rule",
-         "model_text.rule", "scoring.mode"]
+RULES = ["context.rule", "classifier.roles", "classifier.line_string", "classifier.input_ids", "channels", "text.rule",
+         "text.whitespace", "text.patterns.section", "text.patterns.codes", "text.patterns.url", "text.patterns.ipv4",
+         "text.patterns.ipv6", "text.patterns.not_secure", "text.patterns.icons", "text.patterns.discord_tags",
+         "text.shown", "text.discord_name", "text.names", "text.repeat", "links.pattern", "links.rule",
+         "coverage.rule", "model_text.rule"]
 RULES_HOW = ("sha256 of the UTF-8 of the values at the paths of `of`, in that order, joined by U+0000; a list is its "
              "items joined by one space, numbers in decimal")
 
@@ -281,6 +311,14 @@ def rules_hash(b):
     return hashlib.sha256("\x00".join(value(p) for p in RULES).encode("utf-8")).hexdigest()
 
 
+def served_rules():
+    """The parts of bundle.json that `rules.sha256` covers, without a model or a bundle."""
+    from .coverage import RULE as COVERAGE_RULE
+    return {"context": context_rules(), "classifier": classifier_rules(None), "channels": I.CHANNELS,
+            "text": text_rules(), "links": links_rules(None), "coverage": {"rule": COVERAGE_RULE},
+            "model_text": {"rule": "v3_meaning_v1"}}
+
+
 def bundle_content(cfg, hashes):
     """bundle.json without its version. hashes: SHA-256 of every graph and tokenizer file, by bundle path."""
     f = folders(cfg)
@@ -288,7 +326,7 @@ def bundle_content(cfg, hashes):
     s = tomllib.loads((p / "bundle.toml").read_text(encoding="utf-8"))
     thr = slot_thresholds(cfg, f)
     graphs = json.loads((f["models"] / "graphs.json").read_text(encoding="utf-8"))
-    c_meta = c_run(f["c"])
+    run_meta = classifier_run(f["classifier"])
 
     def rel(path):
         for root, name in ((cfg.work, ""), (cfg.data, "data/")):
@@ -301,63 +339,42 @@ def bundle_content(cfg, hashes):
                 "bin_sha256": hashes[f"models/{k}.bin"], "bin_bytes": (f["models"] / f"{k}.bin").stat().st_size,
                 **graphs[k]}
     render = dict(s["judge"]["render"])
-    kinds = render.pop("kinds")
-    if list(kinds) != I.KINDS:
-        raise SystemExit(f"data/v4/bundle.toml [judge.render.kinds] must name {I.KINDS} in that order")
-    if set(thr["kinds"]) != set(I.KINDS):
-        raise SystemExit(f"data/v4/thresholds.json kinds must give a threshold for each of {I.KINDS}")
+    categories = render.pop("categories")
+    if list(categories) != I.CATEGORIES:
+        raise SystemExit(f"data/v4/bundle.toml [judge.render.categories] must name {I.CATEGORIES} in that order")
+    if set(thr["categories"]) != set(I.CATEGORIES):
+        raise SystemExit(f"the slot's thresholds.json categories must give a threshold for each of {I.CATEGORIES}")
     from .coverage import RULE as COVERAGE_RULE
     content = {
         "coverage": {"rule": COVERAGE_RULE},
         "model_text": {"rule": "v3_meaning_v1"},
-        "scoring": {"mode": "c_only"},
-        "models": {"c": f"{rel(f['c'])} ({c_meta['run']}), input cut to {c_meta['max_tokens']} tokens"},
+        "models": {"classifier": f"{rel(f['classifier'])} ({run_meta['run']}), input cut to "
+                                 f"{run_meta['max_tokens']} tokens"},
         "graphs": g,
-        "tokenizers": {"c": {"file": "models/c_tokenizer.json", "sha256": hashes["models/c_tokenizer.json"]}},
+        "tokenizers": {"classifier": {"file": "models/classifier_tokenizer.json",
+                                      "sha256": hashes["models/classifier_tokenizer.json"]}},
         "tokenizer_use": "HuggingFace tokenizers format. Encode each string alone with add_special_tokens = false, "
                          "no truncation, no padding; the ids are the encoding's ids.",
         "special_tokens": {"bos": I.BOS, "pad": I.PAD, "eos": I.EOS},
-        "outputs": I.OUTS, "kinds": I.KINDS,
+        "outputs": I.OUTS, "categories": I.CATEGORIES,
         "channels": I.CHANNELS,
         "text": text_rules(),
         "openvino": {"version": graphs["openvino"], "device": "CPU", "compile": COMPILE,
                      "batch": 1, "attention_mask": "all ones, the input's length"},
-        "context": {
-            "lines": I.CTX_LINES, "seconds": I.CTX_SECONDS,
-            "public_channels": sorted(I.PUBLIC), "placed_channels": sorted(I.PLACED), "private_channel": I.PRIVATE,
-            "author_key": "the account name lowercased; a Discord relay line (no account) is 'discord:' + the "
-                          "prepared Discord name lowercased",
-            "partner_key": "a private message's addressee, its account name lowercased",
-            "time": "whole seconds",
-            "rule": f"Per stream, in arrival order. A private message (msg) takes the earlier private messages between "
-                    f"the same two keys (either direction); a placed line (sign, book, item, tag, nick) the same "
-                    f"author's earlier placed lines (any placed channel); every other line the earlier public lines. "
-                    f"Of that list take the last {I.CTX_LINES}, then keep those with time(line) - time(earlier) <= "
-                    f"{I.CTX_SECONDS}. After a line is handled it is appended: a msg to its pair's list, a placed line "
-                    f"to its author's list, a public-channel line (chat, guild, me, discord) to the public list. Any "
-                    f"other channel (muted, mail, ...) takes public context but is appended nowhere."},
-        "c": {
-            "max_tokens": c_meta["max_tokens"],
-            "roles": "names = {author(target): 't'}; walking context lines oldest first then the target: the speaker "
-                     "is named first, then (msg) the partner; a new key gets 's' + len(names) (s1, s2, ...)",
-            "line_string": "tag + role(author) + ': ' + text; tag = '' for chat, '[msg to ' + role(partner) + '] ' for "
-                           "msg, '[' + channel + '] ' otherwise",
-            "input_ids": "body = for each context string: ids + [2]; then [2] + ids(target string) + [2]; "
-                         "input = [0] + last c.max_tokens - 1 ids of body (cut from the left, mid-line if need be)",
-            "score": f"c(input_ids [1, T], attention_mask ones [1, T]) -> logits [1, 8]; the hold logit is index "
-                     f"{I.HOLD}"},
+        "context": context_rules(),
+        "classifier": classifier_rules(run_meta["max_tokens"]),
         "thresholds": {
             "hold": {k: thr["hold_" + k] for k in ("1pct", "2pct", "recall")},
-            "default": "recall", "kinds": {k: thr["kinds"][k] for k in I.KINDS},
+            "default": "recall", "categories": {k: thr["categories"][k] for k in I.CATEGORIES},
             "rule": "Reject uncovered targets before folding, context, scoring or judgment. Ask the player to "
-                    "shorten the target. Score every covered target with C. Hold when the C hold logit reaches "
-                    "hold[threshold]. Mark kinds whose C logits reach kinds[kind], in kinds order. Kind marks "
-                    "are diagnostic hints and do not clear a hold.",
-            "set_on": thr["set_on"], "kinds_set_on": thr["kinds_set_on"],
+                    "shorten the target. Score every covered target with the classifier. Hold when its hold logit "
+                    "reaches hold[threshold]. Mark the categories whose logits reach categories[category], in "
+                    "categories order. Category marks are diagnostic hints and do not clear a hold.",
+            "set_on": thr["set_on"], "categories_set_on": thr["categories_set_on"],
             "guard_band": thr["guard_band"], "traffic": thr["traffic"], "provenance": thr["made_from"]},
         "links": links_rules(s["links"]["canonical"]),
         "judge": {"question": "judge/question.md", "examples": "judge/examples.json",
-                  "checkpoints": s["judge"]["checkpoints"], "render": {**render, "kinds": kinds}},
+                  "checkpoints": s["judge"]["checkpoints"], "render": {**render, "categories": categories}},
         "example": example(cfg)}
     content["rules"] = {"sha256": rules_hash(content), "of": RULES, "how": RULES_HOW}
     return content
@@ -392,19 +409,19 @@ def check_reader(out):
     need(t["hold"] and all(isinstance(v, float) and np.isfinite(v) for v in t["hold"].values()),
          "thresholds")
     need(t["default"] in t["hold"], "thresholds.default")
-    need(isinstance(t["kinds"], dict) and set(t["kinds"]) <= set(b["kinds"])
-         and all(isinstance(v, float) for v in t["kinds"].values()), "thresholds.kinds")
+    need(isinstance(t["categories"], dict) and set(t["categories"]) <= set(b["categories"])
+         and all(isinstance(v, float) for v in t["categories"].values()), "thresholds.categories")
     cp, r = j["checkpoints"], j["render"]
     need(cp["schedule"] and all(is_int(n) and n >= 1 for n in cp["schedule"]), "judge.checkpoints.schedule")
     need(all(is_int(cp[k]) and cp[k] >= 0 for k in ("every", "wait_seconds", "review_held"))
-         and is_int(cp["sitting_end_seconds"]) and cp["sitting_end_seconds"] >= 1, "judge.checkpoints")
+         and is_int(cp["session_end_seconds"]) and cp["session_end_seconds"] >= 1, "judge.checkpoints")
     need(all(is_int(r[k]) and r[k] >= 0 for k in ("before", "after", "cut_before", "cut_after"))
          and r["max_chars"] >= 1, "judge.render")
-    need(isinstance(r["kinds"], dict) and set(r["kinds"]) == set(b["kinds"]), "judge.render.kinds")
+    need(isinstance(r["categories"], dict) and set(r["categories"]) == set(b["categories"]), "judge.render.categories")
     need(b["links"]["canonical"].strip(), "links.canonical")
     need(all(isinstance(x, str) and x for x in b["channels"]), "channels")
-    need(b.get("scoring", {}).get("mode") == "c_only", "scoring.mode")
-    need(set(b["graphs"]) == {"c"} and set(b["tokenizers"]) == {"c"}, "C-only graph and tokenizer")
+    need(set(b["graphs"]) == {"classifier"} and set(b["tokenizers"]) == {"classifier"},
+         "the classifier's graph and tokenizer")
     tx = b["text"]
     need(all(isinstance(tx[k], str) and tx[k] for k in ("rule", "shown", "discord_name", "names", "repeat",
                                                        "cut_mark", "ip_mark")), "text rules")
@@ -464,7 +481,7 @@ def wire(stream, lid, time, ch, account, partner, raw_text, raw_shown, trusted):
 def vector_lines(cfg, table):
     """lines.jsonl: the first `lines` lines of each [vectors] run of the full table (with every copy folded into them,
     at its own time), in wire form; about trusted_share of the lines other than Discord relays marked trusted. Returns
-    ([(dossier, id)] of the table rows, in stream order), the records."""
+    ([(transcript, id)] of the table rows, in stream order), the records."""
     v = tomllib.loads((private(cfg) / "bundle.toml").read_text(encoding="utf-8"))["vectors"]
     rng = np.random.default_rng(v["seed"])
     rows, recs = [], []
@@ -472,21 +489,21 @@ def vector_lines(cfg, table):
         t = table[table.run == spec["run"]].iloc[:spec["lines"]]
         if len(t) < spec["lines"]:
             raise SystemExit(f"[vectors] run {spec['run']} has {len(t)} rows in [export] batch, not {spec['lines']}")
-        # rows and copies in the dossier's order: by file, second, log lines before record lines, line number
-        files = {d: k for k, d in enumerate(dict.fromkeys(t.dossier))}
+        # rows and copies in the transcript's order: by file, second, log lines before record lines, line number
+        files = {d: k for k, d in enumerate(dict.fromkeys(t.transcript))}
 
-        def at(dossier, lid, time):
-            return files[dossier], time, lid[0] != "L", int(lid[1:])
+        def at(transcript, lid, time):
+            return files[transcript], time, lid[0] != "L", int(lid[1:])
 
         events = []
         for r in t.itertuples(index=False):
             trusted = r.channel != "discord" and rng.random() < v["trusted_share"]
-            events.append((at(r.dossier, r.id, r.time), (r.dossier, r.id),
-                           wire(r.run, f"{r.dossier}:{r.id}", r.time, r.channel, r.account, r.partner, r.raw_text,
+            events.append((at(r.transcript, r.id, r.time), (r.transcript, r.id),
+                           wire(r.run, f"{r.transcript}:{r.id}", r.time, r.channel, r.account, r.partner, r.raw_text,
                                 r.raw_shown, trusted)))
             for c in r.copies:
-                events.append((at(r.dossier, c["id"], c["time"]), None,
-                               wire(r.run, f"{r.dossier}:{c['id']}", c["time"], r.channel, r.account, r.partner,
+                events.append((at(r.transcript, c["id"], c["time"]), None,
+                               wire(r.run, f"{r.transcript}:{c['id']}", c["time"], r.channel, r.account, r.partner,
                                     c["raw_text"], c["raw_shown"], trusted)))
         for _, key, rec in sorted(events, key=lambda e: e[0]):
             rows.append(key)
@@ -495,13 +512,13 @@ def vector_lines(cfg, table):
 
 
 def prep_records(cfg, table, recs):
-    """prep.jsonl: raw to prepared, by the training code (ecc.inputs, the dossier's who()), for every text and name of
+    """prep.jsonl: raw to prepared, by the training code (ecc.inputs, the transcript's who()), for every text and name of
     the vectors, every text and name of the test weeks, and invented edge cases. Each record names what it prepares
     (text, shown, discord_name), its input, and the outputs: pre7 (before step 7) and prepared; a text also linked
     (prepared with data/v4/allowlist.txt's links replaced by links.canonical), a shown name its repeat-key name, a
     Discord name its author key."""
-    from . import dossier as D
-    from .truth import allowlist
+    from . import transcript as T
+    from .line_labels import allowlist
     allow = allowlist(cfg)
     canon = tomllib.loads((private(cfg) / "bundle.toml").read_text(encoding="utf-8"))["links"]["canonical"]
 
@@ -515,7 +532,7 @@ def prep_records(cfg, table, recs):
     def shown(raw, account, note=None):
         pre = I.shown(raw or "") or account
         return {"what": "shown", "raw": raw, "account": account, **({"note": note} if note else {}), "pre7": pre,
-                "prepared": I.redact(pre)[0], "repeat_name": D.who(raw, account).lower()}
+                "prepared": I.redact(pre)[0], "repeat_name": T.who(raw, account).lower()}
 
     def discord(raw, note=None):
         pre = I.discord_name(raw)
@@ -611,7 +628,7 @@ def vectors(cfg, out, vec_dir):
     torch_path = f["out"] / "torch.parquet"
     graphs_made = made_from(f["models"] / "graphs.json")
     tp = made_from(torch_path)
-    if tp is None or graphs_made is None or tp.get("mode") != "c_only" or tp["c"] != graphs_made["c"]:
+    if tp is None or graphs_made is None or tp.get("classifier") != graphs_made.get("classifier"):
         raise SystemExit(f"{torch_path} is not from the models of the graphs; run `uv run export`")
     table = pd.read_parquet(lines_path(cfg))
     keys, recs = vector_lines(cfg, table)
@@ -623,7 +640,7 @@ def vectors(cfg, out, vec_dir):
     write_jsonl(vec_dir / "lines.jsonl", recs)
     write_jsonl(vec_dir / "prep.jsonl", prep_records(cfg, table, recs))
     # scored as ECC-Server scores them once the plugin has sent its default allowed links (data/v4/allowlist.txt)
-    b = reference.Bundle(out, allow=reference.read_allow(cfg.path(cfg["truth"]["allowlist"])))
+    b = reference.Bundle(out, allow=reference.read_allow(cfg.path(cfg["line_labels"]["allowlist"])))
     n = len(recs)
     with progress("vectors (ecc.reference, CPU)", n, "lines") as advance:
         _, secs, timing = reference.score_file(b, vec_dir / "lines.jsonl", vec_dir / "expected.tmp", ids=True,
@@ -632,16 +649,16 @@ def vectors(cfg, out, vec_dir):
     log.info("vectors: %d lines in %.0f s; %s", n, secs, timing)
     got = [json.loads(x) for x in open(vec_dir / "expected.jsonl", encoding="utf-8")]
     # `linked` is under the module's default allowed links, the allowlist the readers' labels used
-    bp = reference.Bundle(out, allow=reference.read_allow(cfg.path(cfg["truth"]["allowlist"])), graphs=False)
+    bp = reference.Bundle(out, allow=reference.read_allow(cfg.path(cfg["line_labels"]["allowlist"])), graphs=False)
     n_prep, prep_same = reference.prep_file(bp, vec_dir / "prep.jsonl", vec_dir / "prep.reference.tmp")
     (vec_dir / "prep.reference.tmp").unlink()
 
     # the training code's inputs and the torch scores of the same lines
     df, _ = load_lines(cfg)
-    at = {(d, i): k for k, (d, i) in enumerate(zip(df.dossier, df.id))}
-    wid = [f"{d}:{i}" for d, i in zip(df.dossier, df.id)]
+    at = {(d, i): k for k, (d, i) in enumerate(zip(df.transcript, df.id))}
+    wid = [f"{d}:{i}" for d, i in zip(df.transcript, df.id)]
     author = I.keys(df)
-    copy_of = {f"{d}:{c['id']}": f"{d}:{i}" for d, i, cs in zip(table.dossier, table.id, table.copies) for c in cs}
+    copy_of = {f"{d}:{c['id']}": f"{d}:{i}" for d, i, cs in zip(table.transcript, table.id, table.copies) for c in cs}
     problems = Counter()
     kept = [(at[key], rec, r) for key, rec, r in zip(keys, recs, got) if key is not None]
     for key, rec, r in zip(keys, recs, got):
@@ -652,54 +669,53 @@ def vectors(cfg, out, vec_dir):
         problems["line dropped, refused or folded"] += bool({"dropped", "refused", "folded_into"} & set(r))
         problems["prepared text"] += r.get("text") != df.text.iloc[i]
         problems["author key"] += r.get("author") != author[i]
-        problems["a covered line not trusted and not a Discord relay is not scored"] += ("c" in r) != (
+        problems["a covered line not trusted and not a Discord relay is not scored"] += ("classifier" in r) != (
             not rec["trusted"] and rec["channel"] != "discord" and r.get("verdict") != "reject")
     # The wire stream includes trusted lines. Preserve that exemption when building its context.
     df["trusted"] = False
     for i, rec, _ in kept:
         df.loc[i, "trusted"] = rec["trusted"]
-    scored = [(i, r) for i, _, r in kept if "c" in r]
+    scored = [(i, r) for i, _, r in kept if "classifier" in r]
     ctx, cids, routes = model_inputs(cfg, df, [i for i, _ in scored])
     import torch
-    from .models import load_c, score_c
+    from .models import load_classifier, score_classifier
     torch.set_num_threads(6)
-    zc = score_c(load_c(f["c"]), cids, torch.device("cpu"))
+    zc = score_classifier(load_classifier(f["classifier"]), cids, torch.device("cpu"))
     thr = b.cfg["thresholds"]
-    worst_c = 0.0
-    passed = held = marked = on_threshold = 0
+    worst = 0.0
+    held = marked = on_threshold = 0
     for k, (i, r) in enumerate(scored):
         problems["context"] += r["context_ids"] != [wid[j] for j in ctx[i]]
-        problems["C input ids"] += r.get("c_input_ids") != cids[k].tolist()
+        problems["classifier input ids"] += r.get("classifier_input_ids") != cids[k].tolist()
         problems["coverage route"] += r.get("coverage") != routes[i]
         tc = zc[k]
-        worst_c = max(worst_c, float(np.abs(np.subtract(r["c"], tc)).max()))
-        passed += 1
+        worst = max(worst, float(np.abs(np.subtract(r["classifier"], tc)).max()))
         differ = False
         exact = False
         for name, th in thr["hold"].items():
             differ |= (tc[I.HOLD] >= th) != r[f"held_{name}"]
             exact |= tc[I.HOLD] == th
-        t_kinds = [kd for kd, th in thr["kinds"].items() if tc[I.OUTS.index(kd)] >= th]
-        differ |= t_kinds != r["kinds"]
-        exact |= any(tc[I.OUTS.index(kd)] == th for kd, th in thr["kinds"].items())
+        marked_here = [kd for kd, th in thr["categories"].items() if tc[I.OUTS.index(kd)] >= th]
+        differ |= marked_here != r["categories"]
+        exact |= any(tc[I.OUTS.index(kd)] == th for kd, th in thr["categories"].items())
         if differ:
             on_threshold += bool(exact)
             problems["decision off a threshold"] += not exact
         held += r["held_recall"]
-        marked += bool(r["kinds"])
+        marked += bool(r["categories"])
     problems = {p: v for p, v in problems.items() if v}
-    if worst_c > C_TOLERANCE:
-        problems[f"C logits {worst_c:.2e} from torch"] = 1
+    if worst > CPU_TOLERANCE:
+        problems[f"classifier logits {worst:.2e} from torch"] = 1
     if prep_same != n_prep:
         problems["prep records ecc.reference prepares otherwise"] = n_prep - prep_same
     chans = Counter(rec["channel"] for _, rec, _ in kept)
     summary = (f"{n} lines in wire form ({len(kept)} table rows: {', '.join(f'{c} {v}' for c, v in chans.most_common())}; "
                f"{n - len(kept)} copies; {sum(rec['trusted'] for _, rec, _ in kept)} trusted; "
                f"{sum(rec['text'] != r.get('text') for _, rec, r in kept)} whose raw text the preparation changes), "
-               f"{len(scored)} scored, {passed} passed, {held} held at recall, {marked} marked with a kind. Prepared "
+               f"{len(scored)} scored, {held} held at recall, {marked} marked with a category. Prepared "
                f"texts, author keys, copies folded, token ids and contexts: "
                f"{'equal to the training code' if not problems else 'see problems'}. Against torch fp32: max |diff| "
-               f"C {worst_c:.2e}; decisions differing on a line exactly on a threshold "
+               f"{worst:.2e}; decisions differing on a line exactly on a threshold "
                f"{on_threshold}. prep.jsonl: {n_prep} records, {prep_same} prepared by ecc.reference as by the "
                f"training code.")
     write_text(vec_dir / "check.md", summary + ("" if not problems else f"\nProblems (lines): {problems}") + "\n")
@@ -711,29 +727,29 @@ def vectors(cfg, out, vec_dir):
 # ---------------------------------------------------------------- building
 
 def readme_text(cfg):
-    """Describe the C-only artifact without changing the owner's old private template."""
+    """The bundle's README."""
     t = slot_thresholds(cfg, folders(cfg))
-    n = c_run(folders(cfg)["c"])["max_tokens"]
-    return (f"# C-only safety classifier\n\nScore each covered target once with C at {n} tokens. "
+    n = classifier_run(folders(cfg)["classifier"])["max_tokens"]
+    return (f"# Chat-safety classifier\n\nScore each covered target once with the classifier at {n} tokens. "
             "Reject incomplete targets before folding, context or judgment. Read the exact preparation, "
             "normalization, context and token rules from bundle.json. The eight outputs keep their recorded order. "
-            "Use the hold output to decide hold or deliver. Kind marks are hints only.\n\n"
+            "Use the hold output to decide hold or deliver. Category marks are hints only.\n\n"
             f"Use the recall threshold by default. Calibration: {t['set_on']} "
             f"The CPU logit error guard is {t['guard_band']}. Read diagnostic thresholds and measured model-held, "
-            "rejected and total traffic counts from bundle.json. The bundle includes one C graph and one C "
+            "rejected and total traffic counts from bundle.json. The bundle includes the classifier's graph and "
             "tokenizer. Preserve the manifest and verify every file before loading it.\n")
 
 
 def ship_thresholds(cfg, f):
-    """Validate calibrated slot thresholds and refuse a C that must hold more validation chat than the ceiling to
+    """Validate calibrated slot thresholds and refuse a classifier that must hold more validation chat than the ceiling to
     hold every validation offender in time (src/ecc/calibrate.py)."""
     t = slot_thresholds(cfg, f)
     if not t["ceiling_ok"]:
         held = t["traffic"]["val"]["recall"]
         raise SystemExit(
-            f"C holds {held['model_held']} of {held['covered']} covered validation lines at its offenders cut "
+            f"the classifier holds {held['model_held']} of {held['covered']} covered validation lines at its offenders cut "
             f"{t['hold_offenders']:.3f}, over the {t['ceiling']} ceiling {t['hold_' + t['ceiling']]:.3f}: it cannot "
-            "hold every validation offender in time without holding too much chat; train a better C")
+            "hold every validation offender in time without holding too much chat; train a better classifier")
 
 
 def build(cfg):
@@ -748,7 +764,7 @@ def build(cfg):
     from .regressions import require_known_offenders
     require_known_offenders(cfg, f)
     sources = {f"models/{k}.{e}": f["models"] / f"{k}.{e}" for k in GRAPHS for e in ("xml", "bin")}
-    sources["models/c_tokenizer.json"] = f["c"] / "tokenizer.json"
+    sources["models/classifier_tokenizer.json"] = f["classifier"] / "tokenizer.json"
     log.info("hashing the graphs and tokenizers")
     hashes = {k: sha256(p) for k, p in sources.items()}
     question, examples = judge_texts(cfg)
@@ -800,9 +816,9 @@ def verified_manifest(out, version=None):
         raise SystemExit(f"{out}: bundle files differ from its manifest: {sorted(actual ^ expected)}")
     try:
         b = json.loads((out / "bundle.json").read_text(encoding="utf-8"))
-        if b.get("proof_only") or b.get("scoring", {}).get("mode") != "c_only" or \
-                set(b.get("graphs", {})) != {"c"} or set(b.get("tokenizers", {})) != {"c"}:
-            raise ValueError("release requires a production C-only graph and tokenizer")
+        if b.get("proof_only") or set(b.get("graphs", {})) != {"classifier"} or \
+                set(b.get("tokenizers", {})) != {"classifier"}:
+            raise ValueError("release requires the production classifier's graph and tokenizer")
         required = {"bundle.json", "README.md", b["judge"]["question"], b["judge"]["examples"]}
         marks = {}
         for graph in b["graphs"].values():

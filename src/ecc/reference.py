@@ -3,7 +3,7 @@ ECC-Server does (the text and names prepared, copies folded, OpenVINO on the CPU
 and the bundle's graphs and tokenizers alone. It imports only openvino, tokenizers, numpy and the standard library,
 and none of the pipeline's code, so it checks the bundle independently of the training code.
 
-    uv run python -m ecc.reference BUNDLE IN.jsonl OUT.jsonl [--threads 6] [--all-c] [--ids] [--allow FILE]
+    uv run python -m ecc.reference BUNDLE IN.jsonl OUT.jsonl [--threads 6] [--ids] [--allow FILE]
     uv run python -m ecc.reference BUNDLE --check-example
     uv run python -m ecc.reference BUNDLE --prep IN.jsonl OUT.jsonl
 
@@ -19,13 +19,14 @@ and a Discord relay line are context for later lines and are not scored.
 OUT.jsonl, one record per input record, by what happened to the line:
     {"stream", "id", "refused": "unknown channel", "verdict": "hold"}   a channel outside bundle.json `channels`
     {"stream", "id", "dropped": true, "verdict": "deliver"}           empty after the text's step 6
+    {"stream", "id", "coverage": "rejected", "verdict": "reject"}     an incomplete target (coverage.rule)
     {"stream", "id", "folded_into": "<id>"}                           a copy (text.repeat)
     {"stream", "id", "context_only": true}
-    {"stream", "id", "passed": true, "c": [8 logits], "held_1pct": bool,
-     "held_2pct": bool, "verdict": "hold" | "deliver" (at the bundle's default threshold), "kinds": [the kinds marked,
-     in the bundle's order]}
-Every covered target runs C. --all-c remains an explicit parity option with the same C-only behavior.
---ids adds the prepared text, model text, repeat key, author key, context ids and C input ids.
+    {"stream", "id", "coverage": "scored", "classifier": [8 logits], "held_1pct": bool, "held_2pct": bool,
+     "held_recall": bool, "verdict": "hold" | "deliver" (at the bundle's default threshold),
+     "categories": [the categories marked, in the bundle's order]}
+--ids adds the prepared text, model text, repeat key, author key, context ids and the classifier's input ids
+(`classifier_input_ids`).
 --allow names an allowed-link file (one host or host/prefix per line, with # comments).
 --check-example rebuilds bundle.json's worked example and compares every feature, string and token id
 exactly and the logits within 1e-3. --prep reads prep.jsonl records (`what`: text, shown or discord_name; the raw
@@ -148,16 +149,14 @@ class Bundle:
             raise ValueError("bundle must require complete current targets")
         if self.cfg.get("model_text", {}).get("rule") != "v3_meaning_v1":
             raise ValueError("bundle must declare the model text normalization rule")
-        if self.cfg.get("scoring", {}).get("mode") != "c_only":
-            raise ValueError("bundle must declare scoring.mode=c_only")
-        if set(self.cfg.get("graphs", {})) != {"c"} or set(self.cfg.get("tokenizers", {})) != {"c"}:
-            raise ValueError("C-only bundles require exactly graph c and tokenizer c")
+        if set(self.cfg.get("graphs", {})) != {"classifier"} or set(self.cfg.get("tokenizers", {})) != {"classifier"}:
+            raise ValueError("bundle must hold exactly the classifier's graph and tokenizer")
         rules = self.cfg.get("rules", {})
-        paths = ["context.rule", "c.roles", "c.line_string", "c.input_ids", "channels", "text.rule",
-                 "text.whitespace", "text.patterns.section", "text.patterns.codes", "text.patterns.url",
+        paths = ["context.rule", "classifier.roles", "classifier.line_string", "classifier.input_ids", "channels",
+                 "text.rule", "text.whitespace", "text.patterns.section", "text.patterns.codes", "text.patterns.url",
                  "text.patterns.ipv4", "text.patterns.ipv6", "text.patterns.not_secure", "text.patterns.icons",
                  "text.patterns.discord_tags", "text.shown", "text.discord_name", "text.names", "text.repeat",
-                 "links.pattern", "links.rule", "coverage.rule", "model_text.rule", "scoring.mode"]
+                 "links.pattern", "links.rule", "coverage.rule", "model_text.rule"]
         values = []
         for path in paths:
             value = self.cfg
@@ -165,9 +164,10 @@ class Bundle:
                 value = value[key]
             values.append(" ".join(str(x) for x in value) if isinstance(value, list) else value)
         if rules.get("of") != paths or rules.get("sha256") != hashlib.sha256("\x00".join(values).encode()).hexdigest():
-            raise ValueError("bundle has invalid C-only input rules")
-        kinds = ["ask_contact", "give_contact", "ask_personal", "give_personal", "off_server", "sexual", "romantic"]
-        if self.cfg.get("outputs") != kinds + ["hold"] or self.cfg.get("kinds") != kinds:
+            raise ValueError("bundle has invalid input rules")
+        categories = ["ask_contact", "give_contact", "ask_personal", "give_personal", "off_server", "sexual",
+                      "romantic"]
+        if self.cfg.get("outputs") != categories + ["hold"] or self.cfg.get("categories") != categories:
             raise ValueError("bundle has invalid output order")
         entries = list(self.cfg["tokenizers"].values())
         if graphs:
@@ -193,7 +193,7 @@ class Bundle:
             self.req = {k: core.compile_model(self.dir / g["xml"], "CPU", oc).create_infer_request()
                         for k, g in self.cfg["graphs"].items()}
         self.tok = {}
-        for k in ("c",):
+        for k in ("classifier",):
             tk = Tokenizer.from_file(str(self.dir / self.cfg["tokenizers"][k]["file"]))
             tk.no_padding()
             tk.no_truncation()
@@ -202,10 +202,11 @@ class Bundle:
         self.n_ctx, self.secs = c["lines"], c["seconds"]
         self.public, self.placed = set(c["public_channels"]), set(c["placed_channels"])
         self.private = c["private_channel"]
-        self.c_len = self.cfg["c"]["max_tokens"]
+        self.max_tokens = self.cfg["classifier"]["max_tokens"]
         self.hold, self.default = th["hold"], th["default"]
         outs = self.cfg["outputs"]
-        self.kinds = [(k, outs.index(k), th["kinds"][k]) for k in self.cfg["kinds"] if k in th.get("kinds", {})]
+        self.categories = [(k, outs.index(k), th["categories"][k]) for k in self.cfg["categories"]
+                           if k in th.get("categories", {})]
         sp = self.cfg["special_tokens"]
         self.BOS, self.EOS = sp["bos"], sp["eos"]
         self.HOLD = self.cfg["outputs"].index("hold")
@@ -258,9 +259,8 @@ def prepared(t, rec):
 
 
 class Scorer:
-    def __init__(self, bundle, all_c=False, ids=False, inputs_only=False):
+    def __init__(self, bundle, ids=False, inputs_only=False):
         self.b = bundle
-        self.all_c = all_c
         self.ids = ids
         self.inputs_only = inputs_only
         self.streams = defaultdict(Stream)
@@ -275,7 +275,7 @@ class Scorer:
             return st.placed[ln.author]
         return st.public
 
-    def c_strings(self, seq):
+    def strings(self, seq):
         names = {seq[-1].author: "t"}
 
         def name(a):
@@ -293,19 +293,19 @@ class Scorer:
             out.append(f"{tag}{w}: {ln.text}")
         return out
 
-    def c_ids(self, strings):
+    def input_ids(self, strings):
         if len(self.cstr) > 200000:
             self.cstr = {}
         enc = []
         for s in strings:
             if s not in self.cstr:
-                self.cstr[s] = self.b.tok["c"].encode(s, add_special_tokens=False).ids
+                self.cstr[s] = self.b.tok["classifier"].encode(s, add_special_tokens=False).ids
             enc.append(self.cstr[s])
         body = []
         for e in enc[:-1]:
             body += e + [self.b.EOS]
         body += [self.b.EOS] + enc[-1] + [self.b.EOS]
-        return [self.b.BOS] + body[-(self.b.c_len - 1):]
+        return [self.b.BOS] + body[-(self.b.max_tokens - 1):]
 
     # --- one line -----------------------------------------------------------------------------------------------
     def score(self, rec, debug=None):
@@ -328,10 +328,10 @@ class Scorer:
         context_only = rec.get("trusted") or rec.get("context") or rec["channel"] == "discord"
         seq = [st.lines[j] for j in ctx] + [ln]
         if not context_only:
-            target = self.c_strings(seq)[-1]
-            target_ids = b.tok["c"].encode(target, add_special_tokens=False).ids
-            if b.text.shortened(rec.get("text") or "", rec["channel"]) or len(target_ids) + 3 > b.c_len:
-                return {**out, "coverage": "reject", "verdict": "reject"}
+            target = self.strings(seq)[-1]
+            target_ids = b.tok["classifier"].encode(target, add_special_tokens=False).ids
+            if b.text.shortened(rec.get("text") or "", rec["channel"]) or len(target_ids) + 3 > b.max_tokens:
+                return {**out, "coverage": "rejected", "verdict": "reject"}
         last = st.copies.get(key)
         if last is not None and t - last[1] <= b.text.fold_seconds:
             st.copies[key] = (last[0], t)
@@ -340,28 +340,29 @@ class Scorer:
         if context_only:
             out["context_only"] = True
         else:
-            out["coverage"] = "c"
-            strings = self.c_strings(seq)
-            cids = self.c_ids(strings)
+            out["coverage"] = "scored"
+            strings = self.strings(seq)
+            cids = self.input_ids(strings)
             ci = np.asarray([cids], np.int64)
             t1 = time.perf_counter()
-            zc = None if self.inputs_only else b.run("c", input_ids=ci, attention_mask=np.ones_like(ci))[0]
+            zc = None if self.inputs_only else b.run("classifier", input_ids=ci, attention_mask=np.ones_like(ci))[0]
             if zc is not None:
                 if not np.isfinite(zc).all() or len(zc) != 8:
-                    raise ValueError("C returned invalid logits")
-                self.ms["c"].append(1000 * (time.perf_counter() - t1))
+                    raise ValueError("the classifier returned invalid logits")
+                self.ms["classifier"].append(1000 * (time.perf_counter() - t1))
                 held = {k: bool(zc[b.HOLD] >= v) for k, v in b.hold.items()}
-                out.update(c=[float(x) for x in zc], passed=True,
+                out.update(classifier=[float(x) for x in zc],
                            **{"held_" + k: v for k, v in held.items()},
                            verdict="hold" if held[b.default] else "deliver",
-                           kinds=[k for k, i, v in b.kinds if zc[i] >= v])
+                           categories=[k for k, i, v in b.categories if zc[i] >= v])
             else:
-                out.update(inputs_only=True, verdict="unscored", c=None, passed=None, kinds=[])
+                out.update(inputs_only=True, verdict="unscored", classifier=None, categories=[])
             if self.ids:
                 out["context_ids"] = [st.lines[j].rid for j in ctx]
-                out["c_input_ids"] = cids
+                out["classifier_input_ids"] = cids
             if debug is not None:
-                debug[rec["id"]] = {"context_idx": ctx, "strings": strings, "c_ids": cids, "c": out["c"]}
+                debug[rec["id"]] = {"context_idx": ctx, "strings": strings, "input_ids": cids,
+                                    "classifier": out["classifier"]}
         # remember the line for later lines' context
         st.lines.append(ln)
         i = len(st.lines) - 1
@@ -375,9 +376,9 @@ class Scorer:
         return out
 
 
-def score_file(bundle, inp, out, all_c=False, ids=False, progress=None):
+def score_file(bundle, inp, out, ids=False, progress=None):
     """Scores IN.jsonl into OUT.jsonl; returns (lines, seconds, timing summary)."""
-    sc = Scorer(bundle, all_c, ids)
+    sc = Scorer(bundle, ids)
     t0 = time.perf_counter()
     n = 0
     with open(inp, encoding="utf-8") as fi, open(out, "w", encoding="utf-8", newline="\n") as fo:
@@ -443,9 +444,10 @@ def check_example(b):
         d = dbg[s["id"]]
         ctx = [ids[j] for j in d["context_idx"]]
         ok &= ctx == s["context"]
-        ok &= d["strings"][:-1] == s["c"]["context_strings"] and d["strings"][-1] == s["c"]["target_string"]
-        ok &= d["c_ids"] == s["c"]["input_ids"]
-        worst = max(worst, float(np.abs(np.array(d["c"]) - s["c"]["logits_torch_fp32"]).max()))
+        x = s["classifier"]
+        ok &= d["strings"][:-1] == x["context_strings"] and d["strings"][-1] == x["target_string"]
+        ok &= d["input_ids"] == x["input_ids"]
+        worst = max(worst, float(np.abs(np.array(d["classifier"]) - x["logits_torch_fp32"]).max()))
     return ok and worst < 1e-3, ok, worst
 
 
@@ -462,8 +464,7 @@ def main():
     ap.add_argument("inp", nargs="?")
     ap.add_argument("out", nargs="?")
     ap.add_argument("--threads", type=int, default=6)
-    ap.add_argument("--all-c", action="store_true")
-    ap.add_argument("--ids", action="store_true", help="also write each line's C token ids and context")
+    ap.add_argument("--ids", action="store_true", help="also write each line's input ids and context")
     ap.add_argument("--allow", help="a file of allowed links, replaced by links.canonical in what the models read")
     ap.add_argument("--check-example", action="store_true")
     ap.add_argument("--prep", action="store_true", help="IN and OUT are prep.jsonl records")
@@ -478,7 +479,7 @@ def main():
         print(f"example: features, strings and token ids {'equal' if ok else 'DIFFER'}; logits max |diff| against "
               f"torch fp32 {worst:.2e}")
         return 0 if passed else 1
-    n, secs, timing = score_file(b, a.inp, a.out, a.all_c, a.ids)
+    n, secs, timing = score_file(b, a.inp, a.out, a.ids)
     print(f"{n} lines in {secs:.0f} s; {timing}", file=sys.stderr, flush=True)
     return 0
 

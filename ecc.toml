@@ -7,11 +7,11 @@
 # as {work}.
 data = "data"
 
-# `dossier` builds a reader batch's parts from the raw chat, `read` has Codex read them, `truth` makes the line table.
-# A batch is a folder under `batches`: manifest.json, parts/, reads/<reader>/, truth.parquet and disputed.json.
-[dossier]
+# `transcript` builds a reader batch's parts from the raw chat, `read` has Codex read them, `line-labels` makes the
+# line-label table. A batch is a folder under `batches`: manifest.json, parts/, reads/<reader>/ and hold.parquet.
+[transcript]
 batches = "{data}/v4/batches"
-logs = "{data}/raw"                     # a Paper batch's sources are log files under this folder (tf/<file>)
+logs = "{data}/raw"                     # a server-log batch's sources are log files under this folder (tf/<file>)
 record = "{data}/record/tf"             # ECC-Server's daily record: signs, books, item names, lines typed while muted
 messages = "{data}/v4/creayun-messages.parquet"  # a Creayun batch's lines; L<row> is a line's id
 exports = "{data}/raw/creayun"          # Creayun's exports, for the words players typed to authentication commands
@@ -25,8 +25,8 @@ tries = 3               # attempts per part before it is left for the next run
 timeout = 1800          # seconds per attempt
 stop_after = 8          # usage-limit answers in a row that end the run
 # A read is named <reader>-<copy> (codex4-a, codex4-b): every copy of a reader asks its question, a file in
-# `questions`. answer "marks": the seven kinds on every line of a part. answer "details": what each line the truth
-# table marks does, asked only of the parts that hold one. max_parallel caps --parallel.
+# `questions`. answer "marks": the seven categories on every line of a part. answer "details": what each line the
+# line-label table marks does, asked only of the parts that hold one. max_parallel caps --parallel.
 [read.readers.codex4]
 question = "question-v4.md"
 answer = "marks"
@@ -36,41 +36,41 @@ question = "question-v5.md"
 answer = "details"
 max_parallel = 4
 
-[truth]
-tables = "{data}/v4/tables-reviewed-20261116"  # selected table versions; one folder per batch
+[line_labels]
+tables = "{data}/v4/tables-reviewed-20261116"  # selected table versions: <batch>/lines-labelled.parquet
 reads = ["codex4-a", "codex4-b"]        # the two reads every part needs
 third = "codex4-c"                      # the read of the disputed parts; where it answered, two of three decide
 allowlist = "{data}/v4/allowlist.txt"   # links on it are not off_server
-left_out = "{data}/v4/left-out.txt"     # spam texts whose lines are masked on every kind
-test_share = 0.15       # Creayun dossiers (by a hash of the name) whose lines are split test_creayun
+left_out = "{data}/v4/left-out.txt"     # spam texts whose lines are masked on every category
+test_share = 0.15       # Creayun transcripts (by a hash of the name) whose lines are split test_creayun
 
-# The split of every Paper line (truth's `split`), the one period rule of training, thresholds and evaluation: a log
+# The split of every server-log line (the line-label table's `split`), the one period rule of training, thresholds and evaluation: a log
 # file of the `owner` batch is train before `val_from`, val before `test_from` and test from then on, by its date;
-# every other Paper batch is train.
+# every other server-log batch is train.
 [periods]
 val_from = 2026-10-20
 test_from = 2026-10-28
 owner = "full"
 
-# `labels` builds the judge's cases for the hold labels from the batches' truth tables, rendered as the live judge is
-# shown a sitting (data/v4/bundle.toml [judge.render]), the sittings the owner ruled, and from them and the judge's
+# `labels` builds the judge's cases for the hold labels from the batches' line-label tables, rendered as the live judge
+# is shown a session (data/v4/bundle.toml [judge.render]), the sessions the owner ruled, and from them and the judge's
 # reads each batch's hold.parquet.
 [labels]
 batches = ["full", "old", "old2"]
-owner = ["telesphoreo"]                 # the owner's account: his own sittings are no case
-tags = "readers"                        # the case lines' tags: "readers" (their kinds and aim) or "none"
+owner = ["telesphoreo"]                 # the owner's account: his own sessions are no case
+tags = "readers"                        # the case lines' tags: "readers" (their categories and aim) or "none"
 cases = "{data}/v4/judge/cases-reviewed-20261116.json"    # the owner's ruled cases as the judge is shown them
 examples_until = "2026-10-27"           # the last log date of the examples; his later cases are measurement only
 answers = "{data}/v4/labels/reads-reviewed-20261116"      # a folder per read of the judge's answers, keyed by the case text's SHA-256
-reads = ["a", "b"]                      # the reads every case needs; agreeing reads rule its sitting, else split
+reads = ["a", "b"]                      # the reads every case needs; agreeing reads rule its session, else split
 # The reads whose `by` on his rendered cases that are no case here (his examples) places an owner ban that names no
 # `by`; his cases here give it by `reads`. judgeB-a/b: the spike's validation reads of his 168 cases of 2026-11-13.
 by_reads = ["judgeB-a", "judgeB-b"]
 omitted_rulings = ["{data}/rulings/ecc-fresh.json"]  # never supplied; do not invent an owner ruling
 history = "{data}/label-history"        # a replaced hold.parquet is kept in hold-<the run's time>/<batch>/ here
-# The owner's rulings files, in order: the first that rules a sitting gives its ruling and `by`. `cases`: where each
+# The owner's rulings files, in order: the first that rules a session gives its ruling and `by`. `cases`: where each
 # entry's case lines are (the first file holding the case). take = "trusted" or "unsure": only the file's trusted
-# sittings, or the sittings it rules unsure; his unsure sittings of 2026-11-12 come after the files of his later
+# sessions, or the sessions it rules unsure; his unsure sessions of 2026-11-12 come after the files of his later
 # rulings, which rule some of them.
 [[labels.rulings]]
 file = "{data}/rulings/ecc-rulings-2026-11-12-train.json"
@@ -91,25 +91,26 @@ file = "{data}/rulings/prior-reviewed-20261116.json"
 cases = ["{data}/v4/judge/cases-reviewed-20261116.json"]
 
 [train]
-ranker = "{data}/v4/models/C-s2"        # the trained C that ranks the training lines (input.json: its base, max_tokens)
-out = "{work}/train"                    # `trainset` writes the inputs to inputs/, rank.parquet, pick.parquet
-owner = ["full", "old", "old2"]         # the Paper batches: one table, every line taught hold and the kinds
-kinds_only = ["creayun"]                # batches whose lines teach the kinds only
+ranker = "{data}/v4/models/ranker"      # the trained classifier that ranks the training lines (input.json: its base,
+                                        # trained_tokens)
+out = "{work}/train"                    # `trainset` writes inputs/, rank.parquet and training-lines.parquet
+owner = ["full", "old", "old2"]         # the server-log batches: one table, every line taught hold and the categories
+categories_only = ["creayun"]           # batches whose lines teach the categories only
 # The training lines: every train line of [periods] owner; of the other batches the marked lines, the top share of the
 # unmarked ones by the ranker's score and a random share of the rest.
-share = 0.10                            # the other Paper batches
-kinds_share = 0.05                      # the kinds-only batches
+share = 0.10                            # the other server-log batches
+categories_share = 0.05                 # the categories-only batches
 seed = 20261113                         # the random shares' draws
 
-# The base model of C: a Hugging Face repo at a commit sha, copied once into
+# The classifier's base model: a Hugging Face repo at a commit sha, copied once into
 # data/models/base/<repo>@<revision>/ (`uv run python -m ecc.base fetch`); training reads the copy (ecc.base.path).
-[train.c]
+[train.classifier]
 base = "Roblox/roblox-pii-classifier-v2"
 revision = "44a84be3eba4859a7e2a1f7b9cee8df61131f28b"
 files = ["config.json", "model.safetensors", "tokenizer.json", "special_tokens_map.json", "tokenizer_config.json",
          "sentencepiece.bpe.model"]
 tokens = [256]                          # the serving length; preserve the complete current target
-# `train c`: AdamW with this lr and weight decay, a linear warm-up over `warmup` of the steps then a linear decay to 0,
+# `train classifier`: AdamW with this lr and weight decay, a linear warm-up over `warmup` of the steps then a linear decay to 0,
 # gradients clipped to `clip`, `batch` lines a step, a fixed number of epochs and one seed.
 epochs = 3
 lr = 1.5e-5
@@ -119,15 +120,15 @@ clip = 1.0
 batch = 32
 seed = 2
 
-# `export` converts the completed C classifier and checks the real CPU graph against Torch.
+# `export` converts the completed classifier and checks the real CPU graph against Torch.
 [export]
-c = "{work}/train/c-256"    # full C run; export requires its completed training records
-out = "{work}/export"       # one slot per C folder: models/, torch.parquet, thresholds.json, parity.json
+classifier = "{work}/train/classifier-256"  # a full training run; export requires its completed training records
+out = "{work}/export"       # one slot per training run: models/, torch.parquet, thresholds.json, parity.json
 # Score every judged validation and test key, with each full causal run as context.
-batch = "full"          # the selected truth table; raw parts and manifests stay in [dossier] batches
+batch = "full"          # the selected line-label table; raw parts and manifests stay in [transcript] batches
 sample = 3000           # lines of the default parity run, every line within 0.01 of a threshold among them
 
-# `bundle` reads C-only graphs and calibrated thresholds from the export slot.
+# `bundle` reads the graph and calibrated thresholds from the export slot.
 # Read the unchanged judge settings and texts from `private` and owner rulings from `rulings`.
 [bundle]
 private = "{data}/v4"
@@ -138,7 +139,7 @@ rulings = "{data}/rulings/final-reviewed-20261116.json"
 # `ecc-server replay` reads them (chat text: the work folder only).
 [replay]
 out = "{work}/replay"
-owner = "telesphoreo"   # the owner's account: his own sittings are trusted, so the replay never judges them
+owner = "telesphoreo"   # the owner's account: his own sessions are trusted, so the replay never judges them
 
 # Where `bundle` uploads bundles (a private W&B project) and `promote` moves the production alias the model host
 # (ECC-Server) serves. The key is WANDB_API_KEY in .env.
@@ -147,7 +148,7 @@ entity = "telesphoreo-telesphoreo"
 project = "ecc"
 artifact = "classifier-bundle"
 
-# `eval` measures exported and trained C runs on the owner's validation and test weeks and on Creayun's held-out lines.
+# `eval` measures export slots and training runs on the owner's validation and test weeks and on Creayun's held-out lines.
 [eval]
 out = "{work}/eval"
 # `forward` uses the frozen labels and timing. `new` checks hold.parquet against the resolved labels and uses the
@@ -156,7 +157,7 @@ forward = "{data}/v4/gate/actions-forward.parquet"
 forward_batches = { current = "full", old = "old", old2 = "old2" }
 batches = ["full", "old", "old2"]
 creayun = "creayun"             # the batch whose test_creayun lines are Creayun's held-out lines
-holds = [0.005, 0.01, 0.02]     # C alone holds these shares of its run's own validation lines
-kind_share = 0.01               # Creayun: each kind's own output at the score that flags this share of them
+holds = [0.005, 0.01, 0.02]     # a training run holds these shares of its own validation lines
+category_share = 0.01           # Creayun: each category's own output at the score that flags this share of them
 resamples = 1000                # of the log files, for the intervals
 seed = 20261113

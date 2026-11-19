@@ -1,61 +1,61 @@
-"""uv run labels [BATCH...]: the judge's cases for the hold labels, and the sittings the owner ruled.
+"""uv run labels [BATCH...]: the judge's cases for the hold labels, and the sessions the owner ruled.
 
-The owner's sittings. `[labels] rulings` is the ordered list of the owner's rulings files; the first that rules a
-sitting gives its ruling and `by` (when it names no `by`, the next file with the same ruling that names one). An entry
-is keyed `<dossier>|<name>` and lands on the sitting of each of its case's own lines (the player's lines, `>>`, of
+The owner's sessions. `[labels] rulings` is the ordered list of the owner's rulings files; the first that rules a
+session gives its ruling and `by` (when it names no `by`, the next file with the same ruling that names one). An entry
+is keyed `<transcript>|<name>` and lands on the session of each of its case's own lines (the player's lines, `>>`, of
 the case he ruled: the ruling page or the rendered cases its `cases` names), every one of them if the lines are now
-over more than one sitting; an entry with no case anywhere lands on the judged lines of its dossier whose speaker has
+over more than one session; an entry with no case anywhere lands on the judged lines of its transcript whose speaker has
 that name (`account`). An entry that lands on no judged line stops the run.
-Several entries of one file on one sitting: the strongest ruling stands (STRENGTH), trusted if any of them is. A file
-with `take = "trusted"` gives only its trusted sittings, one with `take = "unsure"` only the sittings it rules unsure;
+Several entries of one file on one session: the strongest ruling stands (STRENGTH), trusted if any of them is. A file
+with `take = "trusted"` gives only its trusted sessions, one with `take = "unsure"` only the sessions it rules unsure;
 any other file gives its rulings (block and warn are hold, no ban is not ban), and an entry of it that is unsure or
-carries no ruling leaves the sitting to the next file.
+carries no ruling leaves the session to the next file.
 
-The cases. One per sitting of a batch with a judged line marked (a kind at 1), except the owner's own sittings
-(the sitting's account is one of `[labels] owner`), sittings whose judged lines are all spam raids (`left_out`), and
-sittings any entry of a rulings file rules (a ruling other than unsure). A case shows each marked or disputed line of the
+The cases. One per session of a batch with a judged line marked (a category at 1), except the owner's own sessions
+(the session's account is one of `[labels] owner`), sessions whose judged lines are all spam raids (`left_out`), and
+sessions any entry of a rulings file rules (a ruling other than unsure). A case shows each marked or disputed line of the
 player with the lines around it (`data/v4/bundle.toml [judge.render]` before and after; a private message within its
 own conversation), in log order with each line's time of day, `···` where lines are skipped, the player's lines `>>`,
-each tagged by the tag rule (`[labels] tags`): "readers", the readers' kinds (1) and disputed kinds (-1, unless the
+each tagged by the tag rule (`[labels] tags`): "readers", the readers' categories (1) and disputed categories (-1, unless the
 line is masked) with whom the line is aimed at; "none", no tags. A case longer than `max_chars` characters shows only the marked lines' windows,
 then the narrower `cut_before` / `cut_after` window around them, then that many marked lines spread evenly over the
-sitting (first and last kept) as fit. Beside them, the owner's own cases dated after `[labels] examples_until` that a
+session (first and last kept) as fit. Beside them, the owner's own cases dated after `[labels] examples_until` that a
 rulings file rules, as `[labels] cases` renders them, with id `owner|<case id>`: they measure the judge on the weeks
 after its examples and are never labels.
 
 The judge's examples are the owner's ruled cases `uv run bundle` packs (`[bundle] cases` with
 `[bundle] rulings`) dated up to `[labels] examples_until`. The run stops when one is dated on or after
-`[periods] test_from`, or when one's own lines are on a sitting that is a case.
+`[periods] test_from`, or when one's own lines are on a session that is a case.
 
 The reads. Each of `[labels] reads` is a folder under `[labels] answers` of the judge's answers (ruling, by, sure),
 keyed by the SHA-256 of the case text it read. A call's answers are a new file; files are never changed, and a later
 answer to the same text stands. The run stops, naming them, while a case lacks an answer in any read.
 
-The sitting rulings, one per sitting with a judged line marked and per sitting the owner ruled: the owner's own
-sittings `own`; the owner's sittings his ruling (trusted, unsure, nothing, hold, ban, not ban); a sitting whose judged
-lines are all spam raids `spam raid`; every other sitting the reads' ruling where they agree, else `split`. A ban's
+The session rulings, one per session with a judged line marked and per session the owner ruled: the owner's own
+sessions `own`; the owner's sessions his ruling (trusted, unsure, nothing, hold, ban, not ban); a session whose judged
+lines are all spam raids `spam raid`; every other session the reads' ruling where they agree, else `split`. A ban's
 `by` line is a valid explicit owner `by`, or the exact same valid, nonempty `by` from all selected reads when every
 read is sure and rules ban. A read-derived `by` is marked `judge reads`, including on an owner-ruled ban. Select reads
-on the owner's rendered cases (`[labels] cases`) whose own lines are on the sitting: `[labels] reads` on those that
+on the owner's rendered cases (`[labels] cases`) whose own lines are on the session: `[labels] reads` on those that
 are cases here (his cases after
 `examples_until`), `[labels] by_reads` on the others (his examples). The run stops, naming them, while one of those
-cases lacks an answer in a read of `by_reads`. A `by` must name a judged line of the sitting. Without supported timing,
+cases lacks an answer in a read of `by_reads`. A `by` must name a judged line of the session. Without supported timing,
 `by` is absent. Separately, `censor_after` preserves the conservative boundary: a valid explicit owner `by`, else the
 earliest valid selected read `by`, else the first line marked contact, sexual or romantic, else the first marked line.
 An invalid explicit owner `by` falls back to a marked line. `censor_from` names its source; read-derived boundaries
 also retain the case-text hashes in `censor_hashes` (`by_hashes` for supported read-derived timing). A censor boundary
 is not a ban deadline.
 
-The line labels, one per judged line: `hold` 1, 0 or -1 (left out of the hold loss) and `ban_here`. Unassessed lines
-with a disputed or unsure kind are -1. All-zero unassessed lines and explicit `nothing` sittings are 0. `hold` and
-`ban` sittings are 1 on lines with a kind at 1, -1 on lines whose only non-zero kinds are
--1, 0 otherwise, and in a ban sitting -1 on every line after `censor_after`. Only a supported `by` is `ban_here`;
-every other sitting -1 on its lines with a non-zero kind, 0 otherwise; spam-raid lines (`left_out`) -1.
+The hold labels, one per judged line: `hold` 1, 0 or -1 (left out of the hold loss) and `ban_here`. Unassessed lines
+with a disputed or unsure category are -1. All-zero unassessed lines and explicit `nothing` sessions are 0. `hold` and
+`ban` sessions are 1 on lines with a category at 1, -1 on lines whose only non-zero categories are
+-1, 0 otherwise, and in a ban session -1 on every line after `censor_after`. Only a supported `by` is `ban_here`;
+every other session -1 on its lines with a non-zero category, 0 otherwise; spam-raid lines (`left_out`) -1.
 
-Writes `<work>/labels/cases.json`, `<work>/labels/owner.parquet` (one row per owner-ruled sitting: ruling, by, the
-file it comes from, its cases, and the other sittings those cases' lines are on), `<work>/labels/sittings.parquet`
-(every sitting ruling with its `by`, `censor_after` and their sources and case-text hashes) and each batch's
-`hold.parquet` (dossier, id, sitting, sitting_ruling, sitting_source, hold, ban_here); the `hold.parquet` it replaces
+Writes `<work>/labels/cases.json`, `<work>/labels/owner.parquet` (one row per owner-ruled session: ruling, by, the
+file it comes from, its cases, and the other sessions those cases' lines are on), `<work>/labels/sessions.parquet`
+(every session ruling with its `by`, `censor_after` and their sources and case-text hashes) and each batch's
+`hold.parquet` (transcript, id, session, session_ruling, session_source, hold, ban_here); the `hold.parquet` it replaces
 is first copied to
 `[labels] history`/hold-<the run's time>/<batch>/.
 """
@@ -73,13 +73,13 @@ import numpy as np
 import pandas as pd
 import pyarrow as pa
 
-from . import dossier as D
+from . import transcript as T
 from .core import log, run, write_parquet, write_text
-from .inputs import KINDS
+from .inputs import CATEGORIES
 
 TIER = {"nothing": "nothing", "block": "hold", "warn": "hold", "hold": "hold", "ban": "ban", "no ban": "not ban",
         "not ban": "not ban"}
-# Which ruling stands when several entries of one file land on one sitting (a later one only when stronger).
+# Which ruling stands when several entries of one file land on one session (a later one only when stronger).
 STRENGTH = {"nothing": 0, "block": 1, "no ban": 2, "not ban": 2, "warn": 3, "hold": 3, "ban": 4}
 SERIOUS = ["ask_contact", "give_contact", "sexual", "romantic"]
 TAGS = ("readers", "none")
@@ -109,9 +109,9 @@ def render_settings(cfg):
     """The case rendering the live judge is shown: data/v4/bundle.toml [judge.render]."""
     s = tomllib.loads((cfg.path(cfg["bundle"]["private"]) / "bundle.toml").read_text(encoding="utf-8"))
     r = dict(s["judge"]["render"])
-    names = r.pop("kinds")
-    if list(names) != KINDS:
-        raise SystemExit(f"data/v4/bundle.toml [judge.render.kinds] must name {KINDS} in that order")
+    names = r.pop("categories")
+    if list(names) != CATEGORIES:
+        raise SystemExit(f"data/v4/bundle.toml [judge.render.categories] must name {CATEGORIES} in that order")
     return dict(r, names=names)
 
 
@@ -127,7 +127,7 @@ def sources(cfg):
 
 
 def load_tables(cfg, batches):
-    from .truth import table_path
+    from .line_labels import table_path
     return {b: pd.read_parquet(table_path(cfg, b)) for b in batches}
 
 
@@ -163,14 +163,14 @@ def case_lines(path):
 
 
 class Lines:
-    """Where the judged lines of the batches are: (dossier, line id) and (dossier, speaker's name) -> (batch, sitting).
-    A dossier is one log file named by its stem; one stem in two batches (two log files of one name from different
+    """Where the judged lines of the batches are: (transcript, line id) and (transcript, speaker's name) -> (batch, session).
+    A transcript is one log file named by its stem; one stem in two batches (two log files of one name from different
     logs folders) stops the run."""
 
     def __init__(self, tables):
         seen = defaultdict(list)
         for b, t in tables.items():
-            for d in t["dossier"].unique():
+            for d in t["transcript"].unique():
                 seen[d].append(b)
         twice = {d: bs for d, bs in seen.items() if len(bs) > 1}
         if twice:
@@ -178,25 +178,25 @@ class Lines:
                              + "; ".join(f"{d} ({', '.join(bs)})" for d, bs in sorted(twice.items())[:20]))
         self.by_id, self.by_name = {}, defaultdict(set)
         for b, t in tables.items():
-            if t.duplicated(["dossier", "id"]).any():
-                raise SystemExit(f"{b}: a (dossier, id) is in its table twice")
-            j = t[t["judged"] & t["sitting"].notna()]
-            for d, i, s, sp in zip(j["dossier"], j["id"], j["sitting"], j["speaker"]):
+            if t.duplicated(["transcript", "id"]).any():
+                raise SystemExit(f"{b}: a (transcript, id) is in its table twice")
+            j = t[t["judged"] & t["session"].notna()]
+            for d, i, s, sp in zip(j["transcript"], j["id"], j["session"], j["speaker"]):
                 self.by_id[(d, i)] = (b, s)
                 self.by_name[(d, account(sp))].add((b, s))
 
-    def sittings(self, cid, own):
-        """The sittings an entry lands on, and how: by its case's own lines, else by the name in its key."""
-        dossier, _, name = cid.partition("|")
+    def sessions(self, cid, own):
+        """The sessions an entry lands on, and how: by its case's own lines, else by the name in its key."""
+        transcript, _, name = cid.partition("|")
         if own is not None:
-            return {self.by_id[(dossier, i)] for i in own if (dossier, i) in self.by_id}, "case lines"
-        return set(self.by_name.get((dossier, name), ())), "name"
+            return {self.by_id[(transcript, i)] for i in own if (transcript, i) in self.by_id}, "case lines"
+        return set(self.by_name.get((transcript, name), ())), "name"
 
 
 def owner_rulings(srcs, where):
-    """The owner's ruled sittings, landed on the judged lines `where` (a Lines) knows. Returns (DataFrame, one row per
-    sitting a rulings file decides: batch, sitting, ruling, owner_raw, by, source, by_source, cases, also_on; the set of
-    (batch, sitting) any entry rules; a report dict). Stops when an entry lands on no judged line or a rulings file is
+    """The owner's ruled sessions, landed on the judged lines `where` (a Lines) knows. Returns (DataFrame, one row per
+    session a rulings file decides: batch, session, ruling, owner_raw, by, source, by_source, cases, also_on; the set of
+    (batch, session) any entry rules; a report dict). Stops when an entry lands on no judged line or a rulings file is
     missing."""
     missing = [str(s["file"]) for s in srcs if not s["file"].exists()]
     if missing:
@@ -212,7 +212,7 @@ def owner_rulings(srcs, where):
             own_of.update(lines_cache[f])
         here = {}
         for cid, e in read_rulings(s["file"]).items():
-            sits, how = where.sittings(cid, own_of.get(cid))
+            sits, how = where.sessions(cid, own_of.get(cid))
             how_used[(s["file"].name, how)] += 1
             if not sits:
                 unmapped.append(f"{s['file'].name}: {cid} ({how})")
@@ -248,9 +248,9 @@ def owner_rulings(srcs, where):
                                     cases=", ".join(rec["cases"]), also_on=", ".join(rec["also_on"]))
     if unmapped:
         raise SystemExit(f"{len(unmapped)} owner rulings land on no judged line: " + "; ".join(unmapped))
-    rows = [dict(batch=b, sitting=sid, **v) for (b, sid), v in sorted(decided.items())]
-    cols = ["batch", "sitting", "ruling", "owner_raw", "by", "source", "by_source", "cases", "also_on"]
-    spans = [dict(source=f, case=cid, sittings=v) for (f, cid), v in spans.items()]
+    rows = [dict(batch=b, session=sid, **v) for (b, sid), v in sorted(decided.items())]
+    cols = ["batch", "session", "ruling", "owner_raw", "by", "source", "by_source", "cases", "also_on"]
+    spans = [dict(source=f, case=cid, sessions=v) for (f, cid), v in spans.items()]
     return pd.DataFrame(rows, columns=cols), ruled, dict(spans=spans, used=dict(how_used))
 
 
@@ -284,7 +284,7 @@ def windows(n_rows, positions, pair, talks, before, after):
     return keep
 
 
-def render_text(player, dossier, lines, names):
+def render_text(player, transcript, lines, names):
     """A case as the judge reads it: a header line, then one line per shown line."""
     rows = []
     for ln in lines:
@@ -300,32 +300,32 @@ def render_text(player, dossier, lines, names):
         for k in ln["maybe"]:
             s += f" [maybe: {names[k]}{aim}]"
         rows.append(s)
-    return "player: " + player + " · log " + dossier[:10] + "\n" + "\n".join(rows)
+    return "player: " + player + " · log " + transcript[:10] + "\n" + "\n".join(rows)
 
 
-def render(d, keep, sid, player, dossier, tags, names):
+def render(d, keep, sid, player, transcript, tags, names):
     lines, last = [], None
     for p in sorted(keep):
         r = d[p]
-        mine = r["sitting"] == sid and r["judged"]
+        mine = r["session"] == sid and r["judged"]
         tagged = mine and tags == "readers"
         lines.append(dict(
             id=r["id"], t=hms(int(r["time"]) % 86400), ch=r["channel"], to=r["partner"] or "", who=r["speaker"],
             text=r["text"], n=int(r["sent"]), gap=last is not None and p != last + 1, mine=bool(mine),
-            kinds=[k for k in KINDS if tagged and r[k] == 1],
-            maybe=[k for k in KINDS if tagged and r[k] == -1 and not r["masked"]],
+            kinds=[k for k in CATEGORIES if tagged and r[k] == 1],
+            maybe=[k for k in CATEGORIES if tagged and r[k] == -1 and not r["masked"]],
             aim=r["aim"] if tagged else ""))
         last = p
-    return lines, render_text(player, dossier, lines, names)
+    return lines, render_text(player, transcript, lines, names)
 
 
-def cap(d, sid, flagged, marked, pair, talks, player, dossier, tags, rs):
+def cap(d, sid, flagged, marked, pair, talks, player, transcript, tags, rs):
     """The case within rs["max_chars"]: every flagged line's window; else the marked lines' windows; else the cut
     window around them; else the most marked lines, spread evenly, whose cut windows fit."""
     full, cut = (rs["before"], rs["after"]), (rs["cut_before"], rs["cut_after"])
     for pos, (b, a), how in ((flagged, full, None), (marked, full, "marked lines only"),
                              (marked, cut, f"marked lines, window {cut[0]} before {cut[1]} after")):
-        lines, text = render(d, windows(len(d), pos, pair, talks, b, a), sid, player, dossier, tags, rs["names"])
+        lines, text = render(d, windows(len(d), pos, pair, talks, b, a), sid, player, transcript, tags, rs["names"])
         if len(text) <= rs["max_chars"]:
             return lines, text, how
     n = len(marked)
@@ -333,7 +333,7 @@ def cap(d, sid, flagged, marked, pair, talks, player, dossier, tags, rs):
     while lo <= hi:
         k = (lo + hi) // 2
         pick = sorted({marked[round(i * (n - 1) / max(1, k - 1))] for i in range(k)}) if k > 1 else [marked[0]]
-        lines, text = render(d, windows(len(d), pick, pair, talks, *cut), sid, player, dossier, tags, rs["names"])
+        lines, text = render(d, windows(len(d), pick, pair, talks, *cut), sid, player, transcript, tags, rs["names"])
         if len(text) <= rs["max_chars"]:
             best, lo = (lines, text, k), k + 1
         else:
@@ -347,42 +347,44 @@ def table_cases(batch, t, ruled, owner_names, tags, rs):
     """The cases of one batch table, and its counts."""
     t = t.reset_index(drop=True)
     t["partner"] = t["partner"].fillna("").astype(str)
-    t["sitting"] = t["sitting"].astype(object).where(t["sitting"].notna(), None)
+    t["session"] = t["session"].astype(object).where(t["session"].notna(), None)
     t["masked"] = t["unsure_masked"] | t["left_out"]
     aim = t["aimed_at"].fillna("").astype(str).str.strip()
     t["aim"] = aim.where(~aim.str.lower().isin(["nan", "none"]), "")
     t["old"] = t["speaker"].map(account)
-    j = t[t["judged"] & t["sitting"].notna()]
-    marked_sit = set(j.loc[(j[KINDS] == 1).any(axis=1), "sitting"])
+    j = t[t["judged"] & t["session"].notna()]
+    marked_sit = set(j.loc[(j[CATEGORIES] == 1).any(axis=1), "session"])
     own = {s for s in marked_sit if s.split("|", 1)[1] in owner_names}
-    spam = {s for s, g in j[j["sitting"].isin(marked_sit)].groupby("sitting") if g["left_out"].all()}
+    spam = {s for s, g in j[j["session"].isin(marked_sit)].groupby("session") if g["left_out"].all()}
     owner = {s for s in marked_sit if (batch, s) in ruled}
     todo = sorted(marked_sit - own - spam - owner)
     want = defaultdict(list)
     for s in todo:
         want[s.split("|", 1)[0]].append(s)
-    cols = ["id", "time", "channel", "partner", "speaker", "text", "sent", "judged", "sitting", "masked", "aim",
-            "old"] + KINDS
+    cols = ["id", "time", "channel", "partner", "speaker", "text", "sent", "judged", "session", "masked", "aim",
+            "old"] + CATEGORIES
     cases = []
-    for dossier, g in t[t["dossier"].isin(want)].groupby("dossier", sort=True):
+    for transcript, g in t[t["transcript"].isin(want)].groupby("transcript", sort=True):
         d = g[cols].to_dict("records")
         pair = [frozenset((r["old"], account(r["partner"] or ""))) if r["channel"] == "msg" else None for r in d]
         talks = defaultdict(list)
         for p, key in enumerate(pair):
             if key:
                 talks[key].append(p)
-        for sid in want[dossier]:
-            mine = [p for p, r in enumerate(d) if r["sitting"] == sid and r["judged"]]
-            flagged = [p for p in mine if any(d[p][k] == 1 or (d[p][k] == -1 and not d[p]["masked"]) for k in KINDS)]
-            marked = [p for p in mine if any(d[p][k] == 1 for k in KINDS)]
+        for sid in want[transcript]:
+            mine = [p for p, r in enumerate(d) if r["session"] == sid and r["judged"]]
+            flagged = [p for p in mine if any(d[p][k] == 1 or (d[p][k] == -1 and not d[p]["masked"]) for k in CATEGORIES)]
+            marked = [p for p in mine if any(d[p][k] == 1 for k in CATEGORIES)]
             player = Counter(d[p]["speaker"] for p in mine).most_common(1)[0][0]
-            lines, text, how = cap(d, sid, flagged, marked, pair, talks, player, dossier, tags, rs)
-            counts = {k: sum(1 for p in marked if d[p][k] == 1) for k in KINDS}
+            lines, text, how = cap(d, sid, flagged, marked, pair, talks, player, transcript, tags, rs)
+            counts = {k: sum(1 for p in marked if d[p][k] == 1) for k in CATEGORIES}
+            # A case keeps the field names `dossier`, `kinds` and `kind`: the saved judge reads are bound to the hash
+            # of the cases as written (judge_reads.snapshot).
             cases.append(dict(
-                id=sid, origin="table", batch=batch, dossier=dossier, player=player, counts=counts, total=len(mine),
+                id=sid, origin="table", batch=batch, dossier=transcript, player=player, counts=counts, total=len(mine),
                 marked=len(marked), lines=lines, text=text, mine_ids=[ln["id"] for ln in lines if ln["mine"]],
                 capped=how, kind="contact, sexual or romantic" if any(counts[k] for k in SERIOUS) else "other"))
-    rep = dict(sittings_marked=len(marked_sit), owners_own=len(own), spam=len(spam), owner_ruled=len(owner),
+    rep = dict(sessions_marked=len(marked_sit), owners_own=len(own), spam=len(spam), owner_ruled=len(owner),
                cases=len(cases))
     return cases, rep
 
@@ -400,7 +402,7 @@ def owner_cases(srcs, rendered, examples_until):
 
 
 def build(cfg, tables, srcs, tags, batches=None):
-    """(cases, owner sittings DataFrame, report, Lines) over the batch tables {batch: DataFrame}; the rulings land on any
+    """(cases, owner sessions DataFrame, report, Lines) over the batch tables {batch: DataFrame}; the rulings land on any
     of them, and the table cases are built for `batches` (all by default)."""
     if tags not in TAGS:
         raise SystemExit(f"[labels] tags must be one of {TAGS}, not {tags!r}")
@@ -424,7 +426,7 @@ def build(cfg, tables, srcs, tags, batches=None):
 def examples(cfg, where, cases):
     """The judge's examples: the owner's ruled cases `uv run bundle` packs, dated up to [labels] examples_until, as
     dicts (id, ruling, date, text). Stops when one is dated on or after [periods] test_from or its own lines are on a
-    sitting that is one of `cases`."""
+    session that is one of `cases`."""
     from .bundle import judge_examples
     until, test_from = str(cfg["labels"]["examples_until"]), cfg["periods"]["test_from"].isoformat()
     ex = [e for e in judge_examples(cfg)[1] if e["date"] <= until]
@@ -433,28 +435,28 @@ def examples(cfg, where, cases):
         raise SystemExit(f"{len(late)} examples are dated on or after [periods] test_from {test_from} "
                          f"([labels] examples_until {until}): " + ", ".join(late))
     judged = {(c["batch"], c["id"]) for c in cases if c["origin"] == "table"}
-    own = case_sittings(where, {e["id"]: e["text"] for e in ex})
+    own = case_sessions(where, {e["id"]: e["text"] for e in ex})
     both = [f"{cid} ({', '.join(s for _, s in sorted(own[cid] & judged))})" for cid in own if own[cid] & judged]
     if both:
-        raise SystemExit(f"{len(both)} examples are on a sitting that is also a case: " + "; ".join(both))
+        raise SystemExit(f"{len(both)} examples are on a session that is also a case: " + "; ".join(both))
     return ex
 
 
-def case_sittings(where, texts):
-    """{case id: {(batch, sitting)}} of rendered owner cases {id: text}: the sittings of their own (`>>`) lines."""
+def case_sessions(where, texts):
+    """{case id: {(batch, session)}} of rendered owner cases {id: text}: the sessions of their own (`>>`) lines."""
     out = {}
     for cid, text in texts.items():
-        dossier = cid.split("|", 1)[0]
+        transcript = cid.split("|", 1)[0]
         own = [ln[3:].split(" ", 1)[0] for ln in text.split("\n") if ln.startswith(">> ")]
-        out[cid] = {where.by_id[(dossier, i)] for i in own if (dossier, i) in where.by_id}
+        out[cid] = {where.by_id[(transcript, i)] for i in own if (transcript, i) in where.by_id}
     return out
 
 
 def owner_cases_on(where, rendered):
-    """{(batch, sitting): [(id, text) of the owner's rendered cases (a cases file) whose own lines are on it]}."""
+    """{(batch, session): [(id, text) of the owner's rendered cases (a cases file) whose own lines are on it]}."""
     texts = {c["id"]: c["text"] for c in json.loads(Path(rendered).read_text(encoding="utf-8"))["cases"]}
     on = defaultdict(list)
-    for cid, sits in case_sittings(where, texts).items():
+    for cid, sits in case_sessions(where, texts).items():
         for s in sits:
             on[s].append((cid, texts[cid]))
     return dict(on)
@@ -517,43 +519,43 @@ def ban_reads(text, label, reads, by_reads):
 
 
 def unread_by(tables, cases, owner, by_reads, owner_cases_on, owner_names):
-    """'<sitting>: <case id> (<reads>)' for each of the owner's cases on an owner ban of `tables` with no `by` that is
+    """'<session>: <case id> (<reads>)' for each of the owner's cases on an owner ban of `tables` with no `by` that is
     not a case here and that a read of `by_reads` has no answer for."""
     label = {text_hash(c["text"]) for c in cases}
     out = []
     for r in owner.itertuples():
         if (r.batch not in tables or r.ruling != "ban" or (isinstance(r.by, str) and r.by)
-                or r.sitting.split("|", 1)[1] in owner_names):
+                or r.session.split("|", 1)[1] in owner_names):
             continue
-        for cid, text in owner_cases_on.get((r.batch, r.sitting), []):
+        for cid, text in owner_cases_on.get((r.batch, r.session), []):
             h = text_hash(text)
             lack = [x for x, got in by_reads.items() if h not in got] if h not in label else []
             if lack:
-                out.append(f"{r.sitting}: {cid} ({', '.join(lack)})")
+                out.append(f"{r.session}: {cid} ({', '.join(lack)})")
     return out
 
 
-# ---------------------------------------------------------------- sitting rulings and line labels
+# ---------------------------------------------------------------- session rulings and line labels
 
 def judged_lines(t):
     """The judged lines of a batch table, with `pos` their row in the table (log order)."""
     t = t.reset_index(drop=True)
     j = t[t["judged"]].copy()
     j["pos"] = j.index
-    j["sitting"] = j["sitting"].astype(object).where(j["sitting"].notna(), None)
+    j["session"] = j["session"].astype(object).where(j["session"].notna(), None)
     return j.reset_index(drop=True)
 
 
-def sitting_rulings(tables, cases, owner, reads, by_reads, owner_cases_on, owner_names):
-    """One row per sitting with a judged line marked and per sitting the owner ruled: batch, sitting, ruling, source
+def session_rulings(tables, cases, owner, reads, by_reads, owner_cases_on, owner_names):
+    """One row per session with a judged line marked and per session the owner ruled: batch, session, ruling, source
     (owner, judge, none), supported by/by_from and conservative censor_after/censor_from, with their read case hashes.
     `reads` are the label reads {read: {hash: answer}} (every case read by each),
     `by_reads` the reads whose `by` on the owner's cases that are not cases here (unread_by: every one of them read
-    by each) may supply timing for an owner ban with no `by`; `owner_cases_on` maps (batch, sitting) to its owner cases.
+    by each) may supply timing for an owner ban with no `by`; `owner_cases_on` maps (batch, session) to its owner cases.
     Returns (rows DataFrame, notes)."""
     case_of = {(c["batch"], c["id"]): c for c in cases if c["origin"] == "table"}
     label = {text_hash(c["text"]) for c in cases}
-    owner_of = {(r.batch, r.sitting): r for r in owner.itertuples()}
+    owner_of = {(r.batch, r.session): r for r in owner.itertuples()}
     rows, notes = [], []
 
     def earliest(g, ids, sid, what):
@@ -561,17 +563,17 @@ def sitting_rulings(tables, cases, owner, reads, by_reads, owner_cases_on, owner
         pos = g[g["id"].isin(ids)].set_index("id")["pos"]
         outside = sorted(set(ids) - set(pos.index))
         if outside:
-            notes.append(f"{sid}: {what} by {', '.join(outside)} is not a judged line of the sitting, not used")
+            notes.append(f"{sid}: {what} by {', '.join(outside)} is not a judged line of the session, not used")
         return None if pos.empty else pos.idxmin()
 
     for b, t in tables.items():
         j = judged_lines(t)
-        marked = set(j.loc[(j[KINDS] == 1).any(axis=1), "sitting"]) - {None}
+        marked = set(j.loc[(j[CATEGORIES] == 1).any(axis=1), "session"]) - {None}
         sits = marked | {s for (bb, s) in owner_of if bb == b}
-        groups = {s: g for s, g in j[j["sitting"].isin(sits)].groupby("sitting")}
+        groups = {s: g for s, g in j[j["session"].isin(sits)].groupby("session")}
         for sid in sorted(sits):
             g = groups[sid]
-            r = dict(batch=b, sitting=sid, ruling=None, source="judge", by=None, by_from=None, by_hashes=[],
+            r = dict(batch=b, session=sid, ruling=None, source="judge", by=None, by_from=None, by_hashes=[],
                      censor_after=None, censor_from=None, censor_hashes=[])
             got = []
             if sid.split("|", 1)[1] in owner_names:
@@ -609,39 +611,39 @@ def sitting_rulings(tables, cases, owner, reads, by_reads, owner_cases_on, owner
                     r.update(by=by, by_from="judge reads", by_hashes=hashes)
             if r["censor_after"] is not None and r["censor_after"] not in set(g["id"]):
                 notes.append(f"{sid}: by {r['censor_after']} ({r['censor_from']}) "
-                             "is not a judged line of the sitting, not used")
+                             "is not a judged line of the session, not used")
                 r.update(censor_after=None, censor_from=None, censor_hashes=[])
             if r["ruling"] == "ban" and r["censor_after"] is None:
                 serious = g[(g[SERIOUS] == 1).any(axis=1)]
-                pick = serious if len(serious) else g[(g[KINDS] == 1).any(axis=1)]
+                pick = serious if len(serious) else g[(g[CATEGORIES] == 1).any(axis=1)]
                 if len(pick):
                     r["censor_after"] = pick.sort_values("pos")["id"].iloc[0]
                     r["censor_from"] = "first contact, sexual or romantic line" if len(serious) else "first marked line"
                 else:
                     notes.append(f"{sid}: a ban with no `by` and no marked line; no line is ban_here")
             rows.append(r)
-    cols = ["batch", "sitting", "ruling", "source", "by", "by_from", "by_hashes",
+    cols = ["batch", "session", "ruling", "source", "by", "by_from", "by_hashes",
             "censor_after", "censor_from", "censor_hashes"]
     return pd.DataFrame(rows, columns=cols), notes
 
 
-def line_labels(t, sits):
-    """The labels of a batch table's judged lines, in table order: dossier, id, sitting, sitting_ruling,
-    sitting_source, hold, ban_here; `sits` its rows of sitting_rulings. A disputed or unsure line without a ruling is
-    unknown, even when no firm mark made its sitting a judge case. An explicit nothing ruling clears it.
+def hold_labels(t, sits):
+    """The labels of a batch table's judged lines, in table order: transcript, id, session, session_ruling,
+    session_source, hold, ban_here; `sits` its rows of session_rulings. A disputed or unsure line without a ruling is
+    unknown, even when no firm mark made its session a judge case. An explicit nothing ruling clears it.
     A ban's censor_after masks later hold targets; only its supported by marks ban_here."""
     j = judged_lines(t)
     n = len(j)
-    firm = (j[KINDS] == 1).any(axis=1).to_numpy()
-    flag = (j[KINDS] != 0).any(axis=1).to_numpy()
+    firm = (j[CATEGORIES] == 1).any(axis=1).to_numpy()
+    flag = (j[CATEGORIES] != 0).any(axis=1).to_numpy()
     maybe = ~firm & flag
     hold = np.where(maybe, -1, 0).astype(np.int8)
     ban_here = np.zeros(n, dtype=np.int8)
     ruling = np.full(n, "clean", dtype=object)
     source = np.full(n, "none", dtype=object)
-    at = {s: g.index.to_numpy() for s, g in j[j["sitting"].isin(set(sits["sitting"]))].groupby("sitting")}
+    at = {s: g.index.to_numpy() for s, g in j[j["session"].isin(set(sits["session"]))].groupby("session")}
     for r in sits.itertuples():
-        idx = at[r.sitting]
+        idx = at[r.session]
         ruling[idx], source[idx] = r.ruling, r.source
         if r.ruling in ("hold", "ban"):
             hold[idx] = np.where(firm[idx], 1, np.where(maybe[idx], -1, 0))
@@ -657,13 +659,13 @@ def line_labels(t, sits):
         else:
             hold[idx] = np.where(flag[idx], -1, 0)
     hold[j["left_out"].to_numpy()] = -1
-    out = j[["dossier", "id", "sitting"]].copy()
-    out["sitting_ruling"], out["sitting_source"], out["hold"], out["ban_here"] = ruling, source, hold, ban_here
+    out = j[["transcript", "id", "session"]].copy()
+    out["session_ruling"], out["session_source"], out["hold"], out["ban_here"] = ruling, source, hold, ban_here
     return out
 
 
 def label_lines(tables, cases, owner, reads, by_reads, owner_cases_on, owner_names):
-    """({batch: line labels}, sitting rulings, notes). Stops while a case lacks an answer in any read, or an owner case
+    """({batch: hold labels}, session rulings, notes). Stops while a case lacks an answer in any read, or an owner case
     that places the `by` of an owner ban lacks one in a read of `by_reads`."""
     missing = unread_by(tables, cases, owner, by_reads, owner_cases_on, owner_names)
     if missing:
@@ -674,8 +676,8 @@ def label_lines(tables, cases, owner, reads, by_reads, owner_cases_on, owner_nam
         log.debug("cases without an answer in every read: %s", ", ".join(missing))
         raise SystemExit(f"{len(missing)} cases lack an answer in a read of [labels] reads ({', '.join(reads)}): "
                          + ", ".join(missing[:20]) + (", ... (all of them in the log)" if len(missing) > 20 else ""))
-    sits, notes = sitting_rulings(tables, cases, owner, reads, by_reads, owner_cases_on, owner_names)
-    out = {b: line_labels(t, sits[sits["batch"] == b]) for b, t in tables.items()}
+    sits, notes = session_rulings(tables, cases, owner, reads, by_reads, owner_cases_on, owner_names)
+    out = {b: hold_labels(t, sits[sits["batch"] == b]) for b, t in tables.items()}
     return out, sits, notes
 
 
@@ -727,28 +729,28 @@ def body(cfg, args):
     write_text(out / "cases.json", json.dumps(cases, ensure_ascii=False, indent=1))
     write_parquet(pa.Table.from_pandas(owner, preserve_index=False), out / "owner.parquet")
     for b, r in rep["batches"].items():
-        log.info("%s: %d sittings with a marked line; the owner's own %d, spam raids %d, owner-ruled %d; %d cases", b,
-                 r["sittings_marked"], r["owners_own"], r["spam"], r["owner_ruled"], r["cases"])
+        log.info("%s: %d sessions with a marked line; the owner's own %d, spam raids %d, owner-ruled %d; %d cases", b,
+                 r["sessions_marked"], r["owners_own"], r["spam"], r["owner_ruled"], r["cases"])
     n = sorted(len(c["text"]) for c in cases if c["origin"] == "table")
     log.info("%d cases (%d of the owner's after %s); characters median %d, max %d; capped %d", len(cases),
              sum(c["origin"] == "owner" for c in cases), lab["examples_until"], n[len(n) // 2] if n else 0,
              n[-1] if n else 0, sum(1 for c in cases if c.get("capped")))
-    log.info("owner's sittings: %s; by source: %s", dict(Counter(owner["ruling"])), dict(Counter(owner["source"])))
+    log.info("owner's sessions: %s; by source: %s", dict(Counter(owner["ruling"])), dict(Counter(owner["source"])))
     log.info("entries landed by: %s", ", ".join(f"{f} {how} {k}" for (f, how), k in rep["used"].items()))
     for s in rep["spans"]:
-        log.info("%s: %s is on %d sittings: %s", s["source"], s["case"], len(s["sittings"]), ", ".join(s["sittings"]))
+        log.info("%s: %s is on %d sessions: %s", s["source"], s["case"], len(s["sessions"]), ", ".join(s["sessions"]))
     log.info("-> %s", out)
 
     hold, sits, notes = resolve_labels(cfg, batches, tables, cases, owner, where)
     for note in notes:
         log.debug("%s", note)
-    write_parquet(pa.Table.from_pandas(sits, preserve_index=False), out / "sittings.parquet")
-    log.info("sittings: %s; %d notes on `by` lines in the log", dict(Counter(sits["source"] + " " + sits["ruling"])),
+    write_parquet(pa.Table.from_pandas(sits, preserve_index=False), out / "sessions.parquet")
+    log.info("sessions: %s; %d notes on `by` lines in the log", dict(Counter(sits["source"] + " " + sits["ruling"])),
              len(notes))
     log.info("ban lines from: %s", dict(Counter(sits.loc[sits["ruling"] == "ban", "by_from"].fillna("none"))))
     keep = cfg.path(lab["history"]) / f"hold-{datetime.now():%Y-%m-%d-%H%M%S}"
     for b, df in hold.items():
-        write_hold(D.batch_dir(cfg, b) / "hold.parquet", df, keep / b)
+        write_hold(T.batch_dir(cfg, b) / "hold.parquet", df, keep / b)
         log.info("%s: %d judged lines, hold 1 / 0 / -1 = %d / %d / %d, ban_here %d", b, len(df),
                  *(int((df["hold"] == v).sum()) for v in (1, 0, -1)), int(df["ban_here"].sum()))
     log.info("wrote hold.parquet of %s; run `uv run backup`", ", ".join(hold))

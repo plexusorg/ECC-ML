@@ -1,6 +1,6 @@
-"""How a chat line becomes the input of the v4 model. Training, evaluation, export and the bundle all build their
-inputs here, so the model sees in deployment exactly what it was trained on. ECC-Server builds the same inputs from
-the rules the bundle states (bundle.json `context`, `c`); `ecc.reference` is a second, plain implementation of
+"""How a chat line becomes the classifier's input. Training, evaluation, export and the bundle all build their
+inputs here, so the classifier sees in deployment exactly what it was trained on. ECC-Server builds the same inputs from
+the rules the bundle states (bundle.json `context`, `classifier`); `ecc.reference` is a second, plain implementation of
 those rules.
 
 A table of lines (pandas) has the columns run (one stream: one server uptime, over one or more log files), id, time
@@ -10,10 +10,11 @@ within each run.
 
 - The context of a line: the earlier lines of its list (a private message: the pair's messages; a placed line: its
   author's placed lines; any other line: the public lines), the last CTX_LINES of them within CTX_SECONDS.
-- C reads the context and the line as one string per line with role names (`render`), tokenized and joined
-  (`CInputs.build`), cut from the left to C's length, which is data of the C run (its input.json `max_tokens`).
+- The classifier reads the context and the line as one string per line with role names (`render`), tokenized and
+  joined (`ClassifierInputs.build`), cut from the left to the classifier's length, which is data of the training run
+  (its input.json `max_tokens`).
 
-A line's text and names are prepared before any of this (`prepare`, `shown`, `discord_name`): the dossier builds the
+A line's text and names are prepared before any of this (`prepare`, `shown`, `discord_name`): the transcript builds the
 training text with these functions, and ECC-Server applies the same rules, which the bundle states (bundle.json
 `text`), to the raw text the plugin sends. Before model input construction, `model_text` normalizes meaning,
 redacts newly revealed addresses and replaces allowed links. Source records and repeat keys keep the prepared text.
@@ -23,8 +24,8 @@ import re
 
 import numpy as np
 
-KINDS = ["ask_contact", "give_contact", "ask_personal", "give_personal", "off_server", "sexual", "romantic"]
-OUTS = KINDS + ["hold"]                 # the model's eight outputs; only hold decides
+CATEGORIES = ["ask_contact", "give_contact", "ask_personal", "give_personal", "off_server", "sexual", "romantic"]
+OUTS = CATEGORIES + ["hold"]            # the classifier's eight outputs; only hold decides
 HOLD = OUTS.index("hold")
 PUBLIC = {"chat", "guild", "me", "discord"}         # appended to the public list
 PLACED = {"sign", "book", "item", "tag", "nick"}    # appended to the author's placed list
@@ -156,7 +157,7 @@ def contexts(df, n=CTX_LINES, seconds=CTX_SECONDS, accept=None):
     return out
 
 
-# ---------------------------------------------------------------- C
+# ---------------------------------------------------------------- the classifier's input
 
 def render(df, ctx, rows):
     """For each row of `rows`: (context strings, the line's string). The line's author is t, the others s1, s2, ... in
@@ -182,7 +183,7 @@ def render(df, ctx, rows):
     return out
 
 
-class CInputs:
+class ClassifierInputs:
     """<s> ctx1 </s> ... ctxN </s></s> line </s>, cut from the left to max_tokens tokens (the <s> kept)."""
 
     def __init__(self, tokenizer_path):

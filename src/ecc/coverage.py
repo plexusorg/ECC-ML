@@ -17,12 +17,12 @@ def source_shortened(raw_text, channel):
     return any(len(url.group(0)) > I.URL_OVER for url in I.URL.finditer(text))
 
 
-def contexts(df, c_tokenizer, c_tokens):
+def contexts(df, tokenizer, max_tokens):
     """Causal context with the serving rejection rule, checked before each line is remembered: (contexts, routes).
 
     Text must already be prepared and canonicalized; raw_text must retain the original source. Context-only and
-    trusted lines are exempt. Each route is `context` (exempt), `reject` (preparation would shorten the source, or
-    the rendered target with its role header does not fit in c_tokens) or `c` (scored). A rejected target never
+    trusted lines are exempt. Each route is `context` (exempt), `rejected` (preparation would shorten the source,
+    or the rendered target with its role header does not fit in max_tokens) or `scored`. A rejected target never
     enters a later line's context. The routes cover all rows, including context rows.
     """
     if "raw_text" not in df:
@@ -42,7 +42,7 @@ def contexts(df, c_tokenizer, c_tokens):
         if exempt[i]:
             return True
         if source_shortened(raw[i], channel[i]):
-            routes[i] = "reject"
+            routes[i] = "rejected"
             return False
         names = {who[i]: "t"}
 
@@ -60,12 +60,12 @@ def contexts(df, c_tokenizer, c_tokens):
         target = f"{tag}t: {text[i]}"
         n = lengths.get(target)
         if n is None:
-            n = len(c_tokenizer.encode(target, add_special_tokens=False).ids)
+            n = len(tokenizer.encode(target, add_special_tokens=False).ids)
             lengths[target] = n
-        if n + 3 > c_tokens:
-            routes[i] = "reject"
+        if n + 3 > max_tokens:
+            routes[i] = "rejected"
             return False
-        routes[i] = "c"
+        routes[i] = "scored"
         return True
 
     return I.contexts(df, accept=keep), routes

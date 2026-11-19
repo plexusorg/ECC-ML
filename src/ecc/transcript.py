@@ -1,22 +1,24 @@
-"""uv run dossier BATCH: build the parts of a reader batch from the raw chat, and check them.
+"""uv run transcript BATCH: build the parts of a reader batch from the raw chat, and check them.
 
-A dossier is the chat of one Paper log file (one server uptime, or one day), or of one Creayun server on one day, as
-plain text a reader reads top to bottom: one line per event, `<id> <time> <channel> <speaker>: <text>`. Long dossiers
-are cut into parts of at most 12,000 tokens. A batch is a folder under [dossier] batches: manifest.json (the sources and
-what was built from them), parts/ (the part files), reads/<reader>/ (the answers, `uv run read`) and truth.parquet
-(`uv run truth`).
+A transcript is the chat of one server log file (one server uptime, or one day), or of one Creayun server on one day,
+as plain text a reader reads top to bottom: one line per event, `<id> <time> <channel> <speaker>: <text>`. Long
+transcripts are cut into parts of at most 12,000 tokens. A batch is a folder under [transcript] batches: manifest.json
+(its kind, the sources and what was built from them), parts/ (the part files), reads/<reader>/ (the answers,
+`uv run read`) and the line-label table (`uv run line-labels`). A part file names its transcript a "Dossier", the word
+the readers' questions use.
 
-    uv run dossier BATCH                        rebuild BATCH's parts from its sources and compare them with the saved
+    uv run transcript BATCH                     rebuild BATCH's parts from its sources and compare them with the saved
                                                 parts; write them only when it has none or no read has answered them
-    uv run dossier BATCH --files "tf/2026-11-1*.log.gz" ...
-                                                a new Paper batch from these log files (globs under [dossier] logs)
-    uv run dossier BATCH --creayun              a new Creayun batch: every server and day of the Creayun message table
-    uv run dossier BATCH --check                only check the saved parts
-    uv run dossier BATCH --rewrite NAME         write the rebuilt parts over parts reads have answered; the saved parts
+    uv run transcript BATCH --files "tf/2026-11-1*.log.gz" ...
+                                                a new server-log batch from these log files (globs under [transcript]
+                                                logs)
+    uv run transcript BATCH --creayun           a new Creayun batch: every server and day of the Creayun message table
+    uv run transcript BATCH --check             only check the saved parts
+    uv run transcript BATCH --rewrite NAME      write the rebuilt parts over parts reads have answered; the saved parts
                                                 and the answers to parts that gain a line or show a line's speaker or
-                                                addressee otherwise go to [dossier] history/NAME
+                                                addressee otherwise go to [transcript] history/NAME
 
-A rebuild of a batch that has parts cuts each dossier where its saved parts were cut, so a line the builder now adds
+A rebuild of a batch that has parts cuts each transcript where its saved parts were cut, so a line the builder now adds
 or leaves out changes only the part that holds it.
 
 Every build ends with the check: no IPv4 or IPv6 address, no authentication command as a line's text, no argument a
@@ -100,7 +102,7 @@ ITEM_CMDS = {"itemname", "iname", "irename", "itemrename", "rename", "lore"}
 TAG_CMDS = {"tag", "prefix"}
 JOINMSG_CMDS = {"setloginmessage", "loginmessage", "setloginmsg"}
 REPORT_CMDS = {"report"}
-RECORD_V4 = {"sign", "book", "item", "muted"}      # the channels the dossier takes from a v4 record
+RECORD_V4 = {"sign", "book", "item", "muted"}      # the channels the transcript takes from a v4 record
 SAME_SECONDS = 10       # a line in the log and in the record are one line within this many seconds
 SHIB_ACTIONS = ("register", "login", "password", "changepassword", "setpassword")
 
@@ -191,7 +193,7 @@ def render_parts(lines, cuts, head):
     return out
 
 
-# ---------------------------------------------------------------- Paper logs
+# ---------------------------------------------------------------- server logs
 
 def log_lines(path):
     opener = gzip.open if path.suffix == ".gz" else open
@@ -215,9 +217,9 @@ def file_day(path):
 
 
 def runs(folder):
-    """{log file name: (run, the run's first day, the file before it in the run or None)} for one Paper logs folder, in
+    """{log file name: (run, the run's first day, the file before it in the run or None)} for one server logs folder, in
     (date, number) order. A run is one server uptime: a file whose first BOOT_LINES lines hold the startup line starts
-    one (named by its dossier stem), and any other file continues the run of the file before it in (date, number)
+    one (named by its transcript stem), and any other file continues the run of the file before it in (date, number)
     order, as Paper starts a new file at midnight without a restart. latest.log comes after every dated file."""
     files = []
     for p in folder.iterdir():
@@ -313,7 +315,7 @@ def record_events(record, day, start, end):
     account name and the text raw)."""
     out, lines = [], {}
     for i, e in record_entries(record, day):
-        # Signs, books and item names never reach the Paper log; a line typed while muted reaches it only through
+        # Signs, books and item names never reach the server log; a line typed while muted reaches it only through
         # NUSH's feed, which hides some.
         if e.get("type") == "message":
             if e.get("channel") in ("sign", "book", "anvil"):
@@ -345,7 +347,7 @@ def record_events(record, day, start, end):
 
 
 class LogPlayers(Players):
-    """parse.Players as the dossier reads a log: a typed player name resolves as EssentialsX resolves it, and a chat
+    """parse.Players as the transcript reads a log: a typed player name resolves as EssentialsX resolves it, and a chat
     name's end tells who spoke."""
 
     def recipient(self, typed, offline):
@@ -496,8 +498,8 @@ def who(display, account):
     return s if account.lower() in s.lower() else f"{s}={account}"
 
 
-def paper_lines(path, record, counts, carry=None, state=None):
-    """The dossier lines of one log file, in order. Returns the day, [(second of day, rendered line)], the ids, per
+def server_log_lines(path, record, counts, carry=None, state=None):
+    """The transcript lines of one log file, in order. Returns the day, [(second of day, rendered line)], the ids, per
     line (the account its speaker resolved to, how), and per line what the plugin sends for it: raw (the text before
     preparation), shown (a chat line's name as the log shows it, a Discord line's name as relayed; else None) and the
     copies folded into it [(id, second of day, raw, shown)], with the line's channel, name (as the judge is shown it),
@@ -514,10 +516,10 @@ def paper_lines(path, record, counts, carry=None, state=None):
     thread in that second (NUSH's feed line for a quarantined player, a muted line); held, its alert names the issuer.
     The player's own chat, on the chat thread, is always theirs. A command /sudo forced is the issuer's too.
 
-    carry: the repeat keys and held alerts still open at the end of the file before in the run, {key: (dossier, line
+    carry: the repeat keys and held alerts still open at the end of the file before in the run, {key: (transcript, line
     id, second relative to this file's midnight)} (a held alert's key starts with None); then also returns this
-    file's open keys and alerts (the next file's carry, with this file's dossier unset for its own lines) and the
-    copies folded into the file before's lines [(dossier, line id, copy)].
+    file's open keys and alerts (the next file's carry, with this file's transcript unset for its own lines) and the
+    copies folded into the file before's lines [(transcript, line id, copy)].
 
     state: the player state at the end of the file before in the run, (parse.Players, {lower account: UUID}), its
     seconds relative to this file's midnight (carried_state), so a player online since before midnight keeps their
@@ -863,7 +865,7 @@ def paper_lines(path, record, counts, carry=None, state=None):
 
 
 def carried_state(state, shift):
-    """A copy of a file's end state (paper_lines) for the next file of its run, whose midnight is `shift` seconds
+    """A copy of a file's end state (server_log_lines) for the next file of its run, whose midnight is `shift` seconds
     later: the pending /sudo seconds move by it."""
     players, uuids = copy.deepcopy(state)
     players.sudo = {k: (issuer, t - shift, kind) for k, (issuer, t, kind) in players.sudo.items()}
@@ -881,7 +883,7 @@ def render(r):
     return f"{r['id']} {hms(r['sec'])} {r['ch']} {r['speaker']}: {r['text']}{rep}"
 
 
-def paper_header(stem, day, record_merged, muted=False):
+def server_log_header(stem, day, record_merged, muted=False):
     rec = " Signs, books, item names and muted lines come from the server's record (ids R<n>); 'muted' is a " \
           "line typed while its speaker was muted, which nobody saw." if record_merged else \
         " This day has no record of signs, books or item names; only signs set by command appear."
@@ -890,6 +892,7 @@ def paper_header(stem, day, record_merged, muted=False):
 
     def head(part, parts):
         over = f" The first {OVERLAP} lines repeat the end of part {part - 1}, for context." if part > 1 else ""
+        # The part text the readers read; its words stay as the reads answered them, so rebuilt parts stay byte-equal.
         return (f"# Dossier {stem}, part {part} of {parts}. Total Freedom (a Minecraft server), {day}, times UTC.\n"
                 f"# Line: id time channel speaker: text. Channels: chat (everyone sees), msg>NAME (private message to "
                 f"NAME), mail>NAME, me (/me action), nick (nickname set), guild, discord (relayed from Discord), sign, "
@@ -899,20 +902,20 @@ def paper_header(stem, day, record_merged, muted=False):
     return head
 
 
-def paper_dossier(path, record, bodies=None, carry=None, state=None):
-    """One log file's dossier: stem, day, counts, parts [(text, first index, end index)], ids, accounts, each line's
-    fields and what the plugin sends for it (paper_lines `raw`), the repeat keys open at its end (`tail`, keyed to this
-    dossier), the copies folded into lines of the file before (`carried`), the player state at its end (`state`),
+def server_log_transcript(path, record, bodies=None, carry=None, state=None):
+    """One log file's transcript: stem, day, counts, parts [(text, first index, end index)], ids, accounts, each line's
+    fields and what the plugin sends for it (server_log_lines `raw`), the repeat keys open at its end (`tail`, keyed to this
+    transcript), the copies folded into lines of the file before (`carried`), the player state at its end (`state`),
     whether the day's record was merged. bodies: the body ids of the saved parts to cut at (split_at), or None for a
-    new cut; carry, state: as paper_lines."""
+    new cut; carry, state: as server_log_lines."""
     counts = collections.Counter()
-    day, lines, ids, accounts, raw, tail, carried, end = paper_lines(path, record, counts, carry, state)
+    day, lines, ids, accounts, raw, tail, carried, end = server_log_lines(path, record, counts, carry, state)
     stem = path.name.replace(".log.gz", "").replace(".log", "")
     if stem == "latest":
         stem = f"{day}-latest"
     tail = {k: (st or stem, rid, t) for k, (st, rid, t) in tail.items()}
     merged = record_file(record, day) is not None
-    head = paper_header(stem, day, merged, any(r["channel"] == "muted" for r in raw))
+    head = server_log_header(stem, day, merged, any(r["channel"] == "muted" for r in raw))
     parts = (split_at(lines, ids, head, bodies) if bodies else split(lines, head)) if lines else []
     return dict(stem=stem, day=day, counts=counts, parts=parts, ids=ids, accounts=accounts, raw=raw, tail=tail,
                 carried=carried, state=end, record=merged)
@@ -1008,6 +1011,7 @@ def creayun_header(stem, server, day):
 
     def head(part, parts):
         over = f" The first {OVERLAP} lines repeat the end of part {part - 1}, for context." if part > 1 else ""
+        # The part text the readers read; its words stay as the reads answered them, so rebuilt parts stay byte-equal.
         return (f"# Dossier {stem}, part {part} of {parts}. Creayun (a Minecraft server network), {where}, {day}; "
                 f"times are to the minute (seconds always :00).\n"
                 f"# Creayun's own servers are {', '.join(NETWORK)}; players move between them with /server NAME.\n"
@@ -1018,7 +1022,7 @@ def creayun_header(stem, server, day):
 
 
 def creayun_lines(rows, secrets, counts):
-    """One server-day's table rows in time order (index = table row) as dossier lines. Returns ([(second, line)],
+    """One server-day's table rows in time order (index = table row) as transcript lines. Returns ([(second, line)],
     the kept rows, {folded row: the row shown}, {dropped row: reason}). The table has minute timestamps and already
     folds a speaker's repeat of their previous message; the fold here (a repeat of any earlier copy within
     FOLD_SECONDS) applies on top. The id of a line is L<row>."""
@@ -1082,10 +1086,10 @@ def creayun_rows(messages, units=None):
     return df.sort_values(["server", "day", "ts", "row"], kind="stable").set_index("row")
 
 
-def creayun_dossiers(cfg, units=None):
-    """{stem: dossier} of every Creayun server-day (or of `units`), each dossier with its parts, rows, folds and
+def creayun_transcripts(cfg, units=None):
+    """{stem: transcript} of every Creayun server-day (or of `units`), each transcript with its parts, rows, folds and
     drops."""
-    d = cfg["dossier"]
+    d = cfg["transcript"]
     secrets, seen = creayun_secrets(cfg.path(d["exports"]))
     log.info("authentication commands in the exports: %d; words kept for the leak test: %d from %d names", seen,
              sum(len(v) for v in secrets.values()), len(secrets))
@@ -1106,7 +1110,7 @@ def creayun_dossiers(cfg, units=None):
 # ---------------------------------------------------------------- batches
 
 def batch_dir(cfg, name):
-    return cfg.path(cfg["dossier"]["batches"]) / name
+    return cfg.path(cfg["transcript"]["batches"]) / name
 
 
 def load_manifest(folder):
@@ -1118,12 +1122,12 @@ def part_files(folder):
     return sorted((folder / "parts").glob("*.part*of*.txt"))
 
 
-def dossier_of(stem):
+def transcript_of(stem):
     return stem.split(".part")[0]
 
 
 def built_parts(d):
-    """{file name: text} of a built dossier."""
+    """{file name: text} of a built transcript."""
     return {f"{d['stem']}.part{k}of{len(d['parts'])}.txt": text for k, (text, _, _) in enumerate(d["parts"], 1)}
 
 
@@ -1134,9 +1138,9 @@ def part_bytes(text):
 
 
 def manifest_entry(d, entry=None):
-    """A dossier's manifest entry, updating `entry` (keeping its order and any field the build does not make)."""
+    """A transcript's manifest entry, updating `entry` (keeping its order and any field the build does not make)."""
     entry = dict(entry or {})
-    entry.setdefault("dossier", d["stem"])
+    entry.setdefault("transcript", d["stem"])
     parts = [dict(file=f"{d['stem']}.part{k}of{len(d['parts'])}.txt", tokens=tokens(text), first=d["ids"][s],
                   last=d["ids"][e - 1]) for k, (text, s, e) in enumerate(d["parts"], 1)]
     entry.update(day=d["day"], record_merged=d.get("record", False), lines=len(d["ids"]), parts=parts,
@@ -1166,13 +1170,13 @@ def saved_bodies(folder, entry):
 
 
 def build_batch(cfg, manifest, folder=None):
-    """[(manifest entry, dossier)] of every dossier the manifest names, built from its sources; a Paper dossier whose
-    parts `folder` holds is cut where they were cut. A source that holds no dossier line gives no dossier (None)."""
+    """[(manifest entry, transcript)] of every transcript the manifest names, built from its sources; a server-log transcript whose
+    parts `folder` holds is cut where they were cut. A source that holds no transcript line gives no transcript (None)."""
     if manifest.get("kind") == "creayun":
-        built = creayun_dossiers(cfg, {(m["server"], m["day"]) for m in manifest["dossiers"]})
-        return [(m, built.get(m["dossier"])) for m in manifest["dossiers"]]
-    logs, record = cfg.path(cfg["dossier"]["logs"]), cfg.path(cfg["dossier"]["record"])
-    run_of = {f"{src}/{f}": r for src in {m["source"].split("/")[0] for m in manifest["dossiers"]}
+        built = creayun_transcripts(cfg, {(m["server"], m["day"]) for m in manifest["transcripts"]})
+        return [(m, built.get(m["transcript"])) for m in manifest["transcripts"]]
+    logs, record = cfg.path(cfg["transcript"]["logs"]), cfg.path(cfg["transcript"]["record"])
+    run_of = {f"{src}/{f}": r for src in {m["source"].split("/")[0] for m in manifest["transcripts"]}
               for f, r in runs(logs / src).items()}
     tails = {}
 
@@ -1184,7 +1188,7 @@ def build_batch(cfg, manifest, folder=None):
             return None, None
         before = f"{source.split('/')[0]}/{before}"
         if before not in tails:
-            d = paper_dossier(logs / before, record, None, *carry(before))
+            d = server_log_transcript(logs / before, record, None, *carry(before))
             tails[before] = (d["day"], d["tail"], d["state"])
         day, tail, state = tails[before]
         shift = (date.fromisoformat(file_day(logs / source)) - date.fromisoformat(day)).days * 86400
@@ -1192,31 +1196,31 @@ def build_batch(cfg, manifest, folder=None):
                  if k[0] is None or t - shift >= -FOLD_SECONDS}, carried_state(state, shift))
 
     out = []
-    for m in manifest["dossiers"]:
-        d = paper_dossier(logs / m["source"], record, saved_bodies(folder, m) if folder else None, *carry(m["source"]))
+    for m in manifest["transcripts"]:
+        d = server_log_transcript(logs / m["source"], record, saved_bodies(folder, m) if folder else None, *carry(m["source"]))
         tails[m["source"]] = (d["day"], d["tail"], d["state"])
-        if m["dossier"] and d["stem"] != m["dossier"]:
-            raise SystemExit(f"{m['source']} builds as {d['stem']}; the manifest names it {m['dossier']}")
+        if m["transcript"] and d["stem"] != m["transcript"]:
+            raise SystemExit(f"{m['source']} builds as {d['stem']}; the manifest names it {m['transcript']}")
         out.append((m, d if d["parts"] else None))
     return out
 
 
 def new_manifest(cfg, args):
     if args.creayun:
-        return {"kind": "creayun", "dossiers": [{"dossier": s, "source": f"creayun-messages.parquet {d['server']} "
+        return {"kind": "creayun", "transcripts": [{"transcript": s, "source": f"creayun-messages.parquet {d['server']} "
                                                  f"{d['day']}", "server": d["server"], "day": d["day"]}
-                                                for s, d in creayun_dossiers(cfg).items()]}
-    logs = cfg.path(cfg["dossier"]["logs"])
+                                                for s, d in creayun_transcripts(cfg).items()]}
+    logs = cfg.path(cfg["transcript"]["logs"])
     files = sorted({p for g in args.files for p in logs.glob(g) if p.is_file()
                     and (DATED.match(p.name) or p.name == "latest.log")})
     if not files:
         raise SystemExit(f"no log file under {logs} matches {' '.join(args.files)}")
-    return {"kind": "paper", "dossiers": [{"dossier": None, "source": p.relative_to(logs).as_posix()} for p in files]}
+    return {"kind": "server_log", "transcripts": [{"transcript": None, "source": p.relative_to(logs).as_posix()} for p in files]}
 
 
 # ---------------------------------------------------------------- the check
 
-# Secret shapes searched in a Creayun batch, which has no server log to take typed passwords from per dossier.
+# Secret shapes searched in a Creayun batch, which has no server log to take typed passwords from per transcript.
 # Placeholders the builder writes ([secret], [email], [id]) do not match.
 SHAPES = {
     "e-mail address": re.compile(r"(?i)[\w.+-]+@[\w-]+(?:\.[\w-]+)*\.[a-z]{2,}"),
@@ -1268,24 +1272,24 @@ def check_part(text, secrets, shapes):
 
 
 class Checker:
-    """The check of one batch's parts, with the authentication words of each dossier's source read once."""
+    """The check of one batch's parts, with the authentication words of each transcript's source read once."""
 
     def __init__(self, cfg, manifest):
         self.cfg, self.creayun = cfg, manifest.get("kind") == "creayun"
-        self.source = {m["dossier"]: m["source"] for m in manifest["dossiers"]}
+        self.source = {m["transcript"]: m["source"] for m in manifest["transcripts"]}
         self.cache = {}
 
-    def secrets(self, dossier):
-        key = "creayun" if self.creayun else self.source[dossier]
+    def secrets(self, transcript):
+        key = "creayun" if self.creayun else self.source[transcript]
         if key not in self.cache:
             if self.creayun:
-                self.cache[key] = creayun_secrets(self.cfg.path(self.cfg["dossier"]["exports"]))[0]
+                self.cache[key] = creayun_secrets(self.cfg.path(self.cfg["transcript"]["exports"]))[0]
             else:
-                self.cache[key] = typed_secrets(self.cfg.path(self.cfg["dossier"]["logs"]) / self.source[dossier])
+                self.cache[key] = typed_secrets(self.cfg.path(self.cfg["transcript"]["logs"]) / self.source[transcript])
         return self.cache[key]
 
     def part(self, name, text):
-        return check_part(text, self.secrets(dossier_of(name)), self.creayun)
+        return check_part(text, self.secrets(transcript_of(name)), self.creayun)
 
 
 def check_batch(cfg, folder, manifest):
@@ -1315,10 +1319,10 @@ def speakers_of(text):
 
 def to_read_again(folder, manifest, want, differ):
     """The parts a rebuild changes for its reads: ({part file: body lines it gains}, {part file: body lines it still
-    holds that show another speaker or addressee}, {dossier: lines no part holds any more}). A part that gains a line or
+    holds that show another speaker or addressee}, {transcript: lines no part holds any more}). A part that gains a line or
     shows a line's speaker or addressee otherwise is read again; one whose body changes otherwise keeps its answers."""
     old_ids, gained, lost, respoken = {}, {}, {}, {}
-    for e in manifest["dossiers"]:
+    for e in manifest["transcripts"]:
         for x in e.get("parts") or []:
             old_ids[x["file"]] = set(body_ids((folder / "parts" / x["file"]).read_text(encoding="utf-8")))
     was = collections.defaultdict(set)
@@ -1346,12 +1350,12 @@ def to_read_again(folder, manifest, want, differ):
 
 def rewrite(cfg, folder, manifest, entries, want, differ, name):
     """Writes the rebuilt parts over a batch whose reads answered the saved ones. The saved manifest and every saved
-    part that differs go to [dossier] history/NAME/<batch>/; so do every read's answers to a part to read again
+    part that differs go to [transcript] history/NAME/<batch>/; so do every read's answers to a part to read again
     (to_read_again: its body gains a line, or a line in it shows another speaker or addressee), which that read answers
     again (`uv run read`). Writes rewrite.json there: the parts rewritten, the parts to read again with the lines they
     gain and the lines that show another speaker, and the lines no part holds any more."""
     import shutil
-    hist = cfg.path(cfg["dossier"]["history"]) / name / folder.name
+    hist = cfg.path(cfg["transcript"]["history"]) / name / folder.name
     if hist.exists():
         raise SystemExit(f"{hist} exists; name another history folder")
     gained, respoken, lost = to_read_again(folder, manifest, want, differ)
@@ -1371,7 +1375,7 @@ def rewrite(cfg, folder, manifest, entries, want, differ, name):
                 moved[r.name].append(a.stem)
     for f in differ:
         (folder / "parts" / f).write_bytes(part_bytes(want[f]))
-    manifest["dossiers"] = entries
+    manifest["transcripts"] = entries
     write_text(folder / "manifest.json", json.dumps(manifest, indent=1))
     report = {"parts_rewritten": differ,
               "parts_to_read_again": {f[:-4]: {"gained": gained.get(f, []), "speaker": respoken.get(f, [])}
@@ -1379,7 +1383,7 @@ def rewrite(cfg, folder, manifest, entries, want, differ, name):
               "answers_moved": dict(moved), "lines_no_longer_built": lost}
     write_text(hist / "rewrite.json", json.dumps(report, indent=1))
     log.info("rewrote %d parts of %s (the saved ones are in %s); %d parts to read again (%d gain %d lines, %d show "
-             "another speaker on %d lines), their answers moved there (%s); %d lines in %d dossiers are no longer built",
+             "another speaker on %d lines), their answers moved there (%s); %d lines in %d transcripts are no longer built",
              len(differ), folder.name, hist, len(again), len(gained), sum(len(v) for v in gained.values()),
              len(respoken), sum(len(v) for v in respoken.values()),
              ", ".join(f"{k} {len(v)}" for k, v in moved.items()) or "none", sum(len(v) for v in lost.values()),
@@ -1396,29 +1400,29 @@ def body(cfg, args):
         return
     if args.files or args.creayun:
         if manifest is not None:
-            raise SystemExit(f"{folder} already holds a batch; `uv run dossier {args.batch}` rebuilds it")
+            raise SystemExit(f"{folder} already holds a batch; `uv run transcript {args.batch}` rebuilds it")
         manifest = new_manifest(cfg, args)
     elif manifest is None:
         raise SystemExit(f"{folder} has no manifest.json; name its sources with --files or --creayun")
     entries, want = [], {}
     for m, d in build_batch(cfg, manifest, folder):
         if d is None:
-            if m["dossier"] is None:
-                log.info("%s holds no dossier line; left out", m["source"])
+            if m["transcript"] is None:
+                log.info("%s holds no transcript line; left out", m["source"])
                 continue
-            raise SystemExit(f"{m['dossier']} builds to no lines")
-        entries.append(manifest_entry(d, {**m, "dossier": d["stem"]}))
+            raise SystemExit(f"{m['transcript']} builds to no lines")
+        entries.append(manifest_entry(d, {**m, "transcript": d["stem"]}))
         want.update(built_parts(d))
     have = {p.name: p for p in part_files(folder)}
     same = [n for n in want if n in have and have[n].read_bytes() == part_bytes(want[n])]
     differ = sorted(set(want) - set(same))
     extra = sorted(set(have) - set(want))
-    log.info("%s: %d dossiers, %d parts built; %d of them equal the saved parts, %d differ or are new, %d saved parts "
+    log.info("%s: %d transcripts, %d parts built; %d of them equal the saved parts, %d differ or are new, %d saved parts "
              "are not built", args.batch, len(entries), len(want), len(same), len(differ), len(extra))
     if have:
-        old = manifest["dossiers"]
-        changed = [e["dossier"] for o, e in zip(old, entries) if o != e]
-        log.info("manifest: %d of %d dossier entries differ from the saved ones%s", len(changed) + abs(len(old) - len(entries)),
+        old = manifest["transcripts"]
+        changed = [e["transcript"] for o, e in zip(old, entries) if o != e]
+        log.info("manifest: %d of %d transcript entries differ from the saved ones%s", len(changed) + abs(len(old) - len(entries)),
                  len(entries), f", first {changed[:3]}" if changed else "")
     if differ or extra:
         answered = [r for r in (folder / "reads").glob("*/*.json")] if (folder / "reads").exists() else []
@@ -1439,7 +1443,7 @@ def body(cfg, args):
                 have[n].unlink()
             for n in differ:
                 (folder / "parts" / n).write_bytes(part_bytes(want[n]))
-            manifest["dossiers"] = entries
+            manifest["transcripts"] = entries
             write_text(folder / "manifest.json", json.dumps(manifest, indent=1))
             log.info("wrote %d parts and manifest.json to %s", len(differ), folder)
     check_batch(cfg, folder, manifest)
@@ -1447,12 +1451,12 @@ def body(cfg, args):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    p.add_argument("batch", help="the batch: a folder under [dossier] batches")
-    p.add_argument("--files", nargs="+", metavar="GLOB", help="a new Paper batch from these log files, relative to "
-                   "[dossier] logs (tf/2026-11-12-1.log.gz, \"tf/2026-11-1*.log.gz\")")
+    p.add_argument("batch", help="the batch: a folder under [transcript] batches")
+    p.add_argument("--files", nargs="+", metavar="GLOB", help="a new server-log batch from these log files, relative to "
+                   "[transcript] logs (tf/2026-11-12-1.log.gz, \"tf/2026-11-1*.log.gz\")")
     p.add_argument("--creayun", action="store_true", help="a new Creayun batch: every server and day of the table")
     p.add_argument("--check", action="store_true", help="only check the saved parts")
     p.add_argument("--rewrite", metavar="NAME", help="write the rebuilt parts over parts reads have answered, the saved "
                    "ones and the answers to parts that gain lines or show a line's speaker or addressee otherwise kept "
-                   "in [dossier] history/NAME")
-    run("dossier", body, p)
+                   "in [transcript] history/NAME")
+    run("transcript", body, p)

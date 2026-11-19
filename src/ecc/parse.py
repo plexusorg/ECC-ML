@@ -1,4 +1,4 @@
-"""The chat-log parsing `dossier` reads the raw chat with: Paper log lines, the commands that carry a message, the
+"""The chat-log parsing `transcript` reads the raw chat with: Paper log lines, the commands that carry a message, the
 player tracking that resolves shown and typed names to accounts (Players), and the FLAGGED embeds of Creayun's Discord
 exports."""
 import collections

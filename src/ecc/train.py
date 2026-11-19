@@ -1,30 +1,33 @@
-"""uv run train c --tokens N: C, the classifier, trained on the inputs `uv run trainset` writes.
+"""uv run train classifier --tokens N: the classifier, trained on the inputs `uv run trainset` writes.
 
-C is XLM-RoBERTa-large ([train.c] base, the pinned copy in data/) with a fresh head of eight sigmoid outputs: the seven
-kinds and hold. A kind at -1 is out of that output's loss; a line with kmask set is out of the kind loss; hold is 0 or 1, and a
-line at hold -1 is out of the hold loss. The loss is the binary cross-entropy summed over the outputs each line takes
-part in, divided by their number. AdamW (lr, weight decay on every parameter, fused), a linear warm-up over the
-[train.c] warmup share of the steps then a linear decay to 0, gradients clipped, bf16 autocast over fp32 weights with
-TF32 matmuls, a fixed number of epochs and one seed ([train.c]). Batches: the rows shuffled, cut in chunks of 64
-batches, each chunk sorted by length, the batch order shuffled.
+The classifier is XLM-RoBERTa-large ([train.classifier] base, the pinned copy in data/) with a fresh head of eight
+sigmoid outputs: the seven categories and hold. A category at -1 is out of that output's loss; a line with
+category_mask set is out of the category loss; hold is 0 or 1, and a line at hold -1 is out of the hold loss. The loss
+is the binary cross-entropy summed over the outputs each line takes part in, divided by their number. AdamW (lr,
+weight decay on every parameter, fused), a linear warm-up over the [train.classifier] warmup share of the steps then a
+linear decay to 0, gradients clipped, bf16 autocast over fp32 weights with TF32 matmuls, a fixed number of epochs and
+one seed ([train.classifier]). Batches: the rows shuffled, cut in chunks of 64 batches, each chunk sorted by length,
+the batch order shuffled.
 
-The training lines are the rows of lines.parquet that <[train] out>/pick.parquet names (dossier, id), in training row
-order: the owner's lines with their hold label (each [train] owner batch's hold.parquet, which `uv run labels` writes),
-then the kinds-only lines (Creayun) at hold -1. C reads each line's ids cut to N tokens (c-<N>.npy); N must be the
-coverage length the inputs were built at. Rejected targets train no loss.
+The training lines are the rows of lines.parquet that <[train] out>/training-lines.parquet names (transcript, id), in
+training row order: the owner's lines with their hold label (each [train] owner batch's hold.parquet, which
+`uv run labels` writes), then the categories-only lines (Creayun) at hold -1. The classifier reads each line's ids cut
+to N tokens (classifier-<N>.npy); N must be the coverage length the inputs were built at. Rejected targets train no
+loss.
 
-After the last epoch C scores, in fp32, the owner's validation and test lines and the kinds-only test_creayun lines.
-The run records GPU use and warns when a step window slows. GPU use alone does not establish memory spill.
-Non-finite losses or gradients stop training before another optimizer update.
+After the last epoch the classifier scores, in fp32, the owner's validation and test lines and the categories-only
+test_creayun lines. The run records GPU use and warns when a step window slows. GPU use alone does not establish
+memory spill. Non-finite losses or gradients stop training before another optimizer update.
 
-Writes <[train] out>/c-<N>[-smoke]/: the model (config.json, model.safetensors, tokenizer.json), scores.parquet
-(dossier, id, period, c_<out>), creayun.parquet (dossier, id, c_<out>), train.json (the steps, each epoch's loss, time
-and memory, GPU readings, the validation hold metric) and last input.json (what export and the bundle read: run,
-max_tokens, the base revision, the settings and what the run was made from).
+Writes <[train] out>/classifier-<N>[-smoke]/: the model (config.json, model.safetensors, tokenizer.json),
+scores.parquet (transcript, id, period, coverage, classifier_<out>), creayun.parquet (transcript, id, coverage,
+classifier_<out>), train.json (the steps, each epoch's loss, time and memory, GPU readings, the validation hold metric)
+and last input.json (what export and the bundle read: run, max_tokens, the base revision, the settings and what the
+run was made from).
 
 The trainer saves verified model, optimizer, scheduler and random state after every epoch. The same command resumes
 an interrupted run only when its inputs, settings and source match. Incomplete checkpoint files remain beside the
-completed epochs. A finished C whose scoring stopped resumes from trained.json without training again.
+completed epochs. A finished run whose scoring stopped resumes from trained.json without training again.
 """
 import os
 
@@ -87,7 +90,7 @@ def pad(seqs, device):
 
 
 def fit(X, Y, W, base, s, checkpoint=None, resume=None):
-    """C trained on the id arrays X with targets Y and loss weights W ([rows, 8] float32 each) from the base model folder
+    """The classifier trained on the id arrays X with targets Y and loss weights W ([rows, 8] float32 each) from the base model folder
     `base`, with the settings s (seed, epochs, lr, batch, warmup, clip, weight_decay). Returns the model, in train mode
     on the GPU, and the training record."""
     import torch
@@ -191,32 +194,33 @@ def fit(X, Y, W, base, s, checkpoint=None, resume=None):
 # ---------------------------------------------------------------- the run's data
 
 def settings(cfg):
-    t = cfg["train"]["c"]
+    t = cfg["train"]["classifier"]
     return {k: t[k] for k in ("seed", "epochs", "lr", "batch", "warmup", "clip", "weight_decay")}
 
 
 def picked(cfg, lines):
-    """Whether each line of lines.parquet is a training line: named in pick.parquet, which must be current with the
-    inputs, the ranking and the hold labels. Refuses a pick naming no line or a line outside the train split."""
+    """Whether each line of lines.parquet is a training line: named in training-lines.parquet, which must be current with the
+    inputs, the ranking and the hold labels. Refuses training lines that name a line twice, a line outside the
+    inputs or the train split, or a rejected line."""
     import pandas as pd
 
     from . import trainset
-    p = trainset.pick_path(cfg)
-    if not is_current(p, trainset.made_pick(cfg)):
+    p = trainset.training_lines_path(cfg)
+    if not is_current(p, trainset.made_training_lines(cfg)):
         raise SystemExit(f"{p} is missing or was made from other inputs, rankings or hold labels; run "
                          f"`uv run trainset`")
-    pick = pd.read_parquet(p, columns=["dossier", "id"])
-    if pick.duplicated().any():
+    chosen = pd.read_parquet(p, columns=["transcript", "id"])
+    if chosen.duplicated().any():
         raise SystemExit(f"{p} names a line twice")
-    m = lines[["dossier", "id", "split"]].reset_index().merge(pick, on=["dossier", "id"], validate="1:1")
-    if len(m) != len(pick):
-        raise SystemExit(f"{len(pick) - len(m):,} lines of {p} are not in the inputs; run `uv run trainset`")
+    m = lines[["transcript", "id", "split"]].reset_index().merge(chosen, on=["transcript", "id"], validate="1:1")
+    if len(m) != len(chosen):
+        raise SystemExit(f"{len(chosen) - len(m):,} lines of {p} are not in the inputs; run `uv run trainset`")
     if (m.split != "train").any():
         raise SystemExit(f"{p} names {int((m.split != 'train').sum()):,} lines outside the train split")
     mask = np.zeros(len(lines), bool)
     mask[m["index"].to_numpy()] = True
-    if (mask & (lines.coverage.to_numpy() == "reject")).any():
-        raise SystemExit(f"{p} selects a rejected target; rebuild the pick")
+    if (mask & (lines.coverage.to_numpy() == "rejected")).any():
+        raise SystemExit(f"{p} selects a rejected target; run `uv run trainset --force`")
     return mask, fingerprint(p)
 
 
@@ -231,21 +235,22 @@ def data(cfg, tokens, limit):
         raise SystemExit(f"{d} is not current with the tables and settings; run `uv run trainset`")
     made = json.loads((d / "inputs.json").read_text(encoding="utf-8"))
     if tokens != made.get("coverage_tokens"):
-        raise SystemExit("train C at the input set's coverage_tokens; rebuild inputs to select another serving length")
-    if tokens not in made["c_tokens"]:
-        raise SystemExit(f"the inputs hold C's ids at {made['c_tokens']} tokens, not {tokens}")
+        raise SystemExit("train the classifier at the input set's coverage_tokens; rebuild the inputs to select "
+                         "another serving length")
+    if tokens not in made["tokens"]:
+        raise SystemExit(f"the inputs hold the classifier's ids at {made['tokens']} tokens, not {tokens}")
     lines = pd.read_parquet(d / "lines.parquet")
-    if "coverage" not in lines or not lines.coverage.isin(["c", "reject"]).all():
+    if "coverage" not in lines or not lines.coverage.isin(["scored", "rejected"]).all():
         raise SystemExit("training inputs need valid coverage routes")
-    if lines.duplicated(["dossier", "id"]).any():
+    if lines.duplicated(["transcript", "id"]).any():
         raise SystemExit(f"{d / 'lines.parquet'} names a line twice")
-    paper = lines.paper_row.to_numpy() >= 0
-    train, pick_fp = picked(cfg, lines)
+    logged = lines.server_log_row.to_numpy() >= 0
+    train, chosen_fp = picked(cfg, lines)
     hold = trainset.hold_labels(cfg, lines)
     split = lines.split.to_numpy()
-    rows, crows = np.flatnonzero(train & paper), np.flatnonzero(train & ~paper)
-    va, te = np.flatnonzero(paper & (split == "val")), np.flatnonzero(paper & (split == "test"))
-    ct = np.flatnonzero(~paper & (split == "test_creayun"))
+    rows, crows = np.flatnonzero(train & logged), np.flatnonzero(train & ~logged)
+    va, te = np.flatnonzero(logged & (split == "val")), np.flatnonzero(logged & (split == "test"))
+    ct = np.flatnonzero(~logged & (split == "test_creayun"))
     if limit:
         r0 = np.random.default_rng(0)
         count = min(limit, len(rows) + len(crows))
@@ -256,27 +261,27 @@ def data(cfg, tokens, limit):
         crows = np.sort(r0.choice(crows, nc, replace=False))
         va, te, ct = va[:SMOKE_SCORED], te[:SMOKE_SCORED], ct[:SMOKE_SCORED]
     rows = np.concatenate([rows, crows])
-    yk = lines[I.KINDS].to_numpy(np.float32)[rows]
+    yk = lines[I.CATEGORIES].to_numpy(np.float32)[rows]
     unknown = (yk < 0).sum(0)
-    wk = (yk >= 0) & ~lines.kmask.to_numpy()[rows, None]
+    wk = (yk >= 0) & ~lines.category_mask.to_numpy()[rows, None]
     yk = np.maximum(yk, 0)
     yh = hold[rows]
     Y = np.concatenate([yk, (yh == 1)[:, None]], 1).astype(np.float32)
     W = np.concatenate([wk, (yh != -1)[:, None]], 1).astype(np.float32)
-    ids, off = trainset.ragged(d / f"c-{tokens}.npy")
+    ids, off = trainset.ragged(d / f"classifier-{tokens}.npy")
     if len(off) != len(lines) + 1:
-        raise SystemExit(f"c-{tokens}.npy holds {len(off) - 1:,} lines, lines.parquet {len(lines):,}")
+        raise SystemExit(f"classifier-{tokens}.npy holds {len(off) - 1:,} lines, lines.parquet {len(lines):,}")
 
     def take(r):
         return [np.array(ids[off[k]:off[k + 1]]) for k in r]
 
-    counts = {"train": len(rows), "train_owner": len(rows) - len(crows), "train_kinds_only": len(crows),
+    counts = {"train": len(rows), "train_owner": len(rows) - len(crows), "train_categories_only": len(crows),
               "train_hold1": int((yh == 1).sum()), "val": len(va), "val_hold1": int((hold[va] == 1).sum()),
               "test": len(te), "test_creayun": len(ct),
-              "kind_unknown_masked": dict(zip(I.KINDS, unknown.tolist())),
-              "kind_weighted": dict(zip(I.KINDS, wk.sum(0).tolist()))}
+              "category_unknown_masked": dict(zip(I.CATEGORIES, unknown.tolist())),
+              "category_weighted": dict(zip(I.CATEGORIES, wk.sum(0).tolist()))}
     made_from = {"inputs": made, "hold": {b: fingerprint(trainset.hold_path(cfg, b))
-                                          for b in cfg["train"]["owner"]}, "pick": pick_fp}
+                                          for b in cfg["train"]["owner"]}, "training_lines": chosen_fp}
     return {"X": take(rows), "Y": Y, "W": W, "lines": lines, "va": va, "te": te, "ct": ct,
             "Xva": take(va), "Xte": take(te), "Xct": take(ct), "vhold": hold[va], "counts": counts,
             "made_from": made_from}
@@ -284,43 +289,43 @@ def data(cfg, tokens, limit):
 
 def frame(lines, rows, z, period=True):
     import pandas as pd
-    r = pd.DataFrame({"dossier": lines.dossier.to_numpy()[rows], "id": lines.id.to_numpy()[rows]})
+    r = pd.DataFrame({"transcript": lines.transcript.to_numpy()[rows], "id": lines.id.to_numpy()[rows]})
     if period:
         r["period"] = lines.split.to_numpy()[rows]
     r["coverage"] = lines.coverage.to_numpy()[rows]
     for k, o in enumerate(I.OUTS):
-        r[f"c_{o}"] = z[:, k]
+        r[f"classifier_{o}"] = z[:, k]
     return r
 
 
 def score(model, seqs):
-    """C's fp32 logits of the id arrays (no TF32, no autocast), as export scores."""
+    """The classifier's fp32 logits of the id arrays (no TF32, no autocast), as export scores."""
     import torch
 
-    from .models import fp32, score_c
+    from .models import fp32, score_classifier
     fp32()
     model.eval()
-    z = score_c(model, seqs, torch.device("cuda"))
+    z = score_classifier(model, seqs, torch.device("cuda"))
     if not np.isfinite(z).all():
-        raise SystemExit("C gave a non-finite logit")
+        raise SystemExit("the classifier gave a non-finite logit")
     return z
 
 
 def score_covered(model, seqs, lines, rows):
     """Keep every row key. Rejected targets have no model score and are blocked by the coverage rule."""
-    valid = lines.coverage.to_numpy()[rows] != "reject"
+    valid = lines.coverage.to_numpy()[rows] != "rejected"
     z = np.zeros((len(rows), len(I.OUTS)), np.float32)
     if valid.any():
         z[valid] = score(model, [x for x, keep in zip(seqs, valid) if keep])
     return z
 
 
-def c_name(tokens, smoke):
-    """A C run's folder name: c-<N>[-smoke]."""
-    return f"c-{tokens}" + ("-smoke" if smoke else "")
+def run_name(tokens, smoke):
+    """A training run's folder name: classifier-<N>[-smoke]."""
+    return f"classifier-{tokens}" + ("-smoke" if smoke else "")
 
 
-def checkpoints(out, request, extra=()):
+def checkpoints(out, request):
     """Verified completed epochs, including optimizer and random state, in epoch order."""
     from .base import sha256
     slots = sorted((p.parent for p in out.glob("epoch-*/complete.json")),
@@ -329,7 +334,7 @@ def checkpoints(out, request, extra=()):
         record = json.loads((slot / "complete.json").read_text(encoding="utf-8"))
         if slot.name != f"epoch-{expected_epoch}" or record.get("request") != request:
             raise SystemExit(f"{slot}: checkpoint epochs are incomplete or belong to another request")
-        expected = {"config.json", "model.safetensors", "tokenizer.json", "optimizer.pt", *extra}
+        expected = {"config.json", "model.safetensors", "tokenizer.json", "optimizer.pt"}
         if set(record.get("files", {})) != expected:
             raise SystemExit(f"{slot}: checkpoint file list is incomplete")
         for name, digest in record["files"].items():
@@ -338,31 +343,31 @@ def checkpoints(out, request, extra=()):
     return slots
 
 
-def train_c(cfg, args):
+def train_classifier(cfg, args):
     from .base import path as base_path
     from .base import pinned
     tokens, limit = args.tokens, args.limit
     s = settings(cfg)
     if args.epochs:
         s["epochs"] = args.epochs
-    name = c_name(tokens, bool(limit or args.epochs))
+    name = run_name(tokens, bool(limit or args.epochs))
     out = cfg.path(cfg["train"]["out"]) / name
     if (out / "input.json").exists() and not args.force:
         raise SystemExit(f"{out} holds a finished run; --force trains it again")
-    base = base_path(cfg, "c")
+    base = base_path(cfg)
     t0 = time.perf_counter()
     D = data(cfg, tokens, limit)
     c = D["counts"]
-    log.info("%s: train %s lines = owner's %s (hold = 1 %s) + kinds-only %s; val %s (hold = 1 %s), test %s, "
+    log.info("%s: train %s lines = owner's %s (hold = 1 %s) + categories-only %s; val %s (hold = 1 %s), test %s, "
              "test_creayun %s; %d tokens (%.0f s)", name, f"{c['train']:,}", f"{c['train_owner']:,}",
-             f"{c['train_hold1']:,}", f"{c['train_kinds_only']:,}", f"{c['val']:,}", f"{c['val_hold1']:,}",
+             f"{c['train_hold1']:,}", f"{c['train_categories_only']:,}", f"{c['val']:,}", f"{c['val_hold1']:,}",
              f"{c['test']:,}", f"{c['test_creayun']:,}", tokens, time.perf_counter() - t0)
     import torch
 
     from .base import sha256
     from .core import source_hash
-    from .models import limit_gpu_memory, load_c
-    repo, rev, _ = pinned(cfg, "c")
+    from .models import limit_gpu_memory, load_classifier
+    repo, rev, _ = pinned(cfg)
     request = json.loads(json.dumps({
         "tokens": tokens, "limit": limit, "smoke": bool(limit or args.epochs), "settings": s,
         "base": {"repo": repo, "revision": rev}, "made_from": D["made_from"],
@@ -382,7 +387,7 @@ def train_c(cfg, args):
         for field in ("X", "Y", "W"):
             del D[field]
         limit_gpu_memory(log)
-        model, rec = load_c(out, torch.device("cuda")), kept["record"]
+        model, rec = load_classifier(out, torch.device("cuda")), kept["record"]
     else:
         if out.exists() and args.force:
             # --force explicitly permits replacing this run's output folder.
@@ -428,20 +433,20 @@ def train_c(cfg, args):
     import pandas as pd
     pd.concat([frame(lines, D["va"], zv), frame(lines, D["te"], zt)]).to_parquet(out / "scores.parquet", index=False)
     frame(lines, D["ct"], zc, period=False).to_parquet(out / "creayun.parquet", index=False)
-    covered = lines.coverage.to_numpy()[D["va"]] != "reject"
+    covered = lines.coverage.to_numpy()[D["va"]] != "rejected"
     rec["val_metric"] = hold_metric(zv[covered, I.HOLD], D["vhold"][covered]) if (D["vhold"][covered] == 1).any() else None
     log.info("scored %s validation, %s test and %s test_creayun lines in fp32 (%d s); validation hold metric %s",
              f"{len(zv):,}", f"{len(zt):,}", f"{len(zc):,}", rec["score_s"], rec["val_metric"])
     write_text(out / "train.json", json.dumps({"settings": s, "counts": c, **rec}, indent=1) + "\n")
     what = f"smoke run on {limit:,} lines, " if limit else ""
     write_text(out / "input.json", json.dumps({
-        "model": "C",
-        "run": f"{name}: C trained at {tokens} tokens, {what}seed {s['seed']}, epoch {s['epochs']} of {s['epochs']}",
+        "model": "classifier",
+        "run": f"{name}: the classifier trained at {tokens} tokens, {what}seed {s['seed']}, epoch {s['epochs']} of {s['epochs']}",
         "base": {"repo": repo, "revision": rev}, "max_tokens": tokens, "trained_tokens": tokens,
         "coverage_tokens": D["made_from"]["inputs"]["coverage_tokens"],
         "ctx_lines": I.CTX_LINES, "ctx_seconds": I.CTX_SECONDS, "seed": s["seed"], "epoch": s["epochs"],
         "outputs": I.OUTS, "limit": limit or None, "smoke": bool(limit or args.epochs), "settings": s, "counts": c,
-        "labels": "the owner's lines: hold.parquet of each [train] owner batch; kinds-only lines teach the kinds only "
+        "labels": "the owner's lines: hold.parquet of each [train] owner batch; categories-only lines teach the categories only "
                   "(hold -1)",
         "made_from": D["made_from"]}, indent=1) + "\n")
     log.info("%s written (%.1f min)", out, (time.perf_counter() - t0) / 60)
@@ -450,16 +455,17 @@ def train_c(cfg, args):
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = ap.add_subparsers(dest="model", required=True)
-    c = sub.add_parser("c", help="train C")
-    c.add_argument("--tokens", type=int, required=True, help="C's length: its input cut to this many tokens")
+    c = sub.add_parser("classifier", help="train the classifier")
+    c.add_argument("--tokens", type=int, required=True, help="the classifier's length: its input cut to this many "
+                                                             "tokens")
     c.add_argument("--epochs", type=int, default=0, help="a smoke run of this many epochs")
     c.add_argument("--limit", type=int, default=0,
-                   help=f"a smoke run on this many training lines (half owner's, half kinds-only, drawn with seed 0), "
+                   help=f"a smoke run on this many training lines (half owner's, half categories-only, drawn with seed 0), "
                         f"scoring the first {SMOKE_SCORED} of each scored set")
     c.add_argument("--force", action="store_true", help="train again over a finished run of the same name")
 
     def body(cfg, args):
-        train_c(cfg, args)
+        train_classifier(cfg, args)
 
     run("train", body, ap)
 

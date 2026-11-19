@@ -1,12 +1,11 @@
-"""Export the completed C classifier as one OpenVINO graph and check it against Torch.
+"""Export the completed classifier as one OpenVINO graph and check it against Torch.
 
-The slot is <[export] out>/<C folder name>. It contains models/c.xml and c.bin,
-C-only torch.parquet, validation-only thresholds.json and parity.json. Reject
-incomplete targets before context. Score every covered target with C. Preserve
-raw preparation, model meaning, canonical links and the trained C token budget.
-The named thresholds and the served default are set as src/ecc/calibrate.py states.
-Keep model-held, input-rejected and total traffic counts separate. Never choose
-thresholds from test outcomes. Refuse smoke, research or changed weights.
+The slot is <[export] out>/<the classifier's folder name>. It holds models/classifier.xml and classifier.bin,
+torch.parquet, the validation-only thresholds.json and parity.json. Reject incomplete targets before context. Score
+every covered target with the classifier. Preserve raw preparation, model meaning, canonical links and the trained
+token budget. The named thresholds and the served default are set as src/ecc/calibrate.py states. Keep model-held,
+input-rejected and total traffic counts separate. Never choose thresholds from test outcomes. Refuse smoke, research
+or changed weights.
 """
 import os
 
@@ -23,10 +22,10 @@ from pathlib import Path  # noqa: E402
 import numpy as np  # noqa: E402
 
 from . import inputs as I  # noqa: E402
-from .calibrate import C_TOLERANCE, SHARES, calibrate  # noqa: E402
+from .calibrate import CPU_TOLERANCE, SHARES, calibrate  # noqa: E402
 from .core import fingerprint, is_current, log, progress, record_inputs, run, write_text  # noqa: E402
 
-GRAPHS = ("c",)
+GRAPHS = ("classifier",)
 # How ECC-Server compiles each graph (bundle.json `openvino.compile`).
 COMPILE = {"INFERENCE_PRECISION_HINT": "f32", "INFERENCE_NUM_THREADS": 6, "PERFORMANCE_HINT": "LATENCY",
            "NUM_STREAMS": 1}
@@ -35,19 +34,19 @@ SEED = 20261114
 
 
 def folders(cfg):
-    """The C model and its export slot."""
+    """The classifier's folder and its export slot."""
     e = cfg["export"]
-    c = cfg.path(e["c"])
-    out = cfg.path(e["out"]) / c.name
-    return {"c": c, "out": out, "models": out / "models"}
+    model = cfg.path(e["classifier"])
+    out = cfg.path(e["out"]) / model.name
+    return {"classifier": model, "out": out, "models": out / "models"}
 
 
-def c_run(folder):
-    """A C run's input.json: `run` (what the run is) and `max_tokens` (the length C serves: its input is cut from the
-    left to that many tokens). Every C input export and the bundle build is cut at it."""
+def classifier_run(folder):
+    """A training run's input.json: `run` (what the run is) and `max_tokens` (the length the classifier serves: its
+    input is cut from the left to that many tokens). Every input export and the bundle build is cut at it."""
     p = Path(folder) / "input.json"
     if not p.exists():
-        raise SystemExit(f"{folder}: no input.json, which records the C run's max_tokens")
+        raise SystemExit(f"{folder}: no input.json, which records the run's max_tokens")
     run_ = json.loads(p.read_text(encoding="utf-8"))
     n = run_.get("max_tokens")
     if not isinstance(n, int) or isinstance(n, bool) or n < 4:
@@ -62,33 +61,33 @@ def c_run(folder):
 
 
 def pair(f):
-    """Verify the completed C model, training source and owned weight bytes before release."""
+    """Verify the completed classifier, training source and owned weight bytes before release."""
     from .base import sha256
     from .core import source_hash
-    c = c_run(f["c"])
-    mark = f["c"] / "trained.json"
-    if not mark.is_file() or not (f["c"] / "train.json").is_file():
-        raise SystemExit("C release needs completed training metadata, not a research fixture")
+    c = classifier_run(f["classifier"])
+    mark = f["classifier"] / "trained.json"
+    if not mark.is_file() or not (f["classifier"] / "train.json").is_file():
+        raise SystemExit("a release needs completed training metadata, not a research fixture")
     trained = json.loads(mark.read_text(encoding="utf-8"))
     req = trained.get("request", {})
     if req.get("smoke") or req.get("limit"):
-        raise SystemExit("refuse a smoke C model")
+        raise SystemExit("refuse a smoke classifier")
     if req.get("code") != source_hash("train", "models", "inputs", "core"):
-        raise SystemExit("C training source differs from the recorded source; preserve the trained source")
+        raise SystemExit("the classifier's training source differs from the recorded source; preserve the trained source")
     if req.get("made_from") != c.get("made_from") or req.get("tokens") != c["max_tokens"]:
-        raise SystemExit("C input metadata does not match its verified training request")
+        raise SystemExit("the classifier's input metadata does not match its verified training request")
     if c.get("outputs") != I.OUTS or c.get("counts", {}).get("train_hold1", 0) <= 0:
-        raise SystemExit("C release needs the eight ordered outputs and real hold-positive training evidence")
+        raise SystemExit("a release needs the eight ordered outputs and real hold-positive training evidence")
     for name in ("config.json", "model.safetensors", "tokenizer.json"):
-        path = f["c"] / name
+        path = f["classifier"] / name
         if not path.is_file() or trained.get("files", {}).get(name) != {"size": path.stat().st_size,
                                                                        "sha256": sha256(path)}:
-            raise SystemExit(f"C training file is missing or changed: {path}")
+            raise SystemExit(f"training file is missing or changed: {path}")
 
 
 def model_marks(f):
-    """The C folder and its fingerprint, recorded with calibrated thresholds."""
-    return {"c": {"folder": f["c"].as_posix(), "fingerprint": fingerprint(f["c"])}}
+    """The classifier's folder and its fingerprint, recorded with calibrated thresholds."""
+    return {"classifier": {"folder": f["classifier"].as_posix(), "fingerprint": fingerprint(f["classifier"])}}
 
 
 def slot_thresholds(cfg, f):
@@ -97,14 +96,14 @@ def slot_thresholds(cfg, f):
     if not path.exists():
         raise SystemExit(f"no {path}; run `uv run export`")
     t = json.loads(path.read_text(encoding="utf-8"))
-    if t.get("scoring", {}).get("mode") != "c_only" or "hold_recall" not in t:
-        raise SystemExit(f"{path}: thresholds require calibrated C-only recall; run `uv run export`")
+    if "hold_recall" not in t:
+        raise SystemExit(f"{path}: thresholds require a calibrated recall threshold; run `uv run export`")
     now = model_marks(f)
     was = t.get("models", {})
-    for k in ("c",):
+    for k in ("classifier",):
         if was.get(k, {}).get("fingerprint") != now[k]["fingerprint"]:
             set_from = was.get(k, {}).get("folder", "models it does not name")
-            raise SystemExit(f"{path} was set from {k.upper()} {set_from} {was.get(k, {}).get('fingerprint')}, not "
+            raise SystemExit(f"{path} was set from {set_from} {was.get(k, {}).get('fingerprint')}, not "
                              f"from [export] {k} {now[k]['folder']} {now[k]['fingerprint']}; run `uv run export`")
     provenance = t.get("made_from", {})
     score = f["out"] / "torch.parquet"
@@ -156,47 +155,47 @@ def describe(path):
 def check_graph(tag, compiled, feeds, ref):
     d = max(float(np.abs(compiled(f)[0] - r).max()) for f, r in zip(feeds, ref))
     log.info("%s: OpenVINO against torch on %d made-up inputs, max |diff| %.2e", tag, len(feeds), d)
-    if not np.isfinite(d) or d > C_TOLERANCE:
+    if not np.isfinite(d) or d > CPU_TOLERANCE:
         raise SystemExit(f"{tag}: the graph differs from the torch model by {d:.3g} on made-up inputs")
 
 
 def graphs_made_from(f):
     from .core import source_hash
-    return {"mode": "c_only", "c": fingerprint(f["c"]), **versions(),
+    return {"classifier": fingerprint(f["classifier"]), **versions(),
             "code": source_hash("core", "inputs", "models", "export")}
 
 
-def convert_c_graph(model_folder, out, max_tokens):
-    """Convert C and compare numerical samples. This function does not certify release provenance."""
+def convert_graph(model_folder, out, max_tokens):
+    """Convert the classifier and compare numerical samples. This function does not certify release provenance."""
     import openvino as ov
     import torch
-    from .models import c_logits, load_c
+    from .models import classifier_logits, load_classifier
     out = Path(out)
     out.mkdir(parents=True, exist_ok=True)
     torch.set_num_threads(6)
     core = ov.Core()
     rng = np.random.default_rng(0)
     dyn2 = ov.PartialShape([-1, -1])
-    w = c_logits(load_c(model_folder))
+    w = classifier_logits(load_classifier(model_folder))
     ex = torch.from_numpy(np.concatenate([[[0]] * 2, rng.integers(5, 200000, (2, 62)), [[2]] * 2], 1).astype(np.int64))
     with torch.no_grad():
         g = ov.convert_model(w, example_input=(ex, torch.ones_like(ex)), input=[dyn2, dyn2])
     name_io(g, ["input_ids", "attention_mask"], ["logits"])
-    ov.save_model(g, out / "c.xml", compress_to_fp16=False)
+    ov.save_model(g, out / "classifier.xml", compress_to_fp16=False)
     del g
-    cm = core.compile_model(out / "c.xml", "CPU", COMPILE)
+    cm = core.compile_model(out / "classifier.xml", "CPU", COMPILE)
     feeds = []
     for n in (5, 100, max_tokens):
         ids = np.concatenate([[0], rng.integers(5, 200000, n - 2), [2]]).astype(np.int64)[None]
         feeds.append({"input_ids": ids, "attention_mask": np.ones_like(ids)})
     with torch.no_grad():
         ref = [w(torch.from_numpy(x["input_ids"]), torch.from_numpy(x["attention_mask"])).numpy() for x in feeds]
-    check_graph("c", cm, feeds, ref)
-    return {"c": describe(out / "c.xml"), "openvino": ov.__version__, "torch": torch.__version__}
+    check_graph("classifier", cm, feeds, ref)
+    return {"classifier": describe(out / "classifier.xml"), "openvino": ov.__version__, "torch": torch.__version__}
 
 
 def export_graphs(cfg, f):
-    """Export only the verified production C model. Numerical fixtures cannot pass this guard."""
+    """Export only the verified production classifier. Numerical fixtures cannot pass this guard."""
     pair(f)
     out = f["models"]
     made_from = graphs_made_from(f)
@@ -204,7 +203,7 @@ def export_graphs(cfg, f):
             is_current(out / "graphs.json", made_from):
         log.info("graphs: %s is current", out)
         return
-    info = convert_c_graph(f["c"], out, c_run(f["c"])["max_tokens"])
+    info = convert_graph(f["classifier"], out, classifier_run(f["classifier"])["max_tokens"])
     write_text(out / "graphs.json", json.dumps(info, indent=1))
     record_inputs(out / "graphs.json", made_from)
 
@@ -216,28 +215,28 @@ def links(cfg):
     entries at start) and bundle.toml's links.canonical, which ECC-Server puts in place of each allowed link."""
     import tomllib
 
-    from .truth import allowlist
+    from .line_labels import allowlist
     canon = tomllib.loads((cfg.path(cfg["bundle"]["private"]) / "bundle.toml").read_text(encoding="utf-8"))["links"]
     return allowlist(cfg), canon["canonical"]
 
 
 def lines_path(cfg):
     """The selected table version of the export batch."""
-    from .truth import table_path
+    from .line_labels import table_path
     return table_path(cfg, cfg["export"]["batch"])
 
 
 def load_lines(cfg):
-    """Every row of the runs that hold a val or test file of [export] batch (truth's `split`), in run order, and each
+    """Every row of the runs that hold a val or test file of [export] batch (the line-label table's `split`), in run order, and each
     judged row of those files with its split as its period: (rows: DataFrame with the columns of ecc.inputs plus
-    dossier and judged, meta: DataFrame dossier, id, period, row). The text is what the models read live: each link
+    transcript and judged, meta: DataFrame transcript, id, period, row). The text is what the classifier reads live: each link
     the module's default allowlist allows replaced by the canonical one (links)."""
     import pandas as pd
     allow, canon = links(cfg)
     import pyarrow.parquet as pq
     from .trainset import with_raw
     path = lines_path(cfg)
-    cols = ["dossier", "run", "id", "time", "channel", "partner", "speaker", "account", "text", "judged", "split"]
+    cols = ["transcript", "run", "id", "time", "channel", "partner", "speaker", "account", "text", "judged", "split"]
     names = pq.ParquetFile(path).schema_arrow.names
     df = with_raw(cfg, pd.read_parquet(path, columns=cols + (["raw_text"] if "raw_text" in names else ["row"])))
     held_out = df.split.isin(["val", "test"])
@@ -246,38 +245,38 @@ def load_lines(cfg):
     df, held_out = df[keep].reset_index(drop=True), held_out[keep].to_numpy()   # whole runs: contexts as in training
     df["text"] = [I.model_text(t, allow, canon) if isinstance(t, str) else t for t in df.text]
     j = np.flatnonzero(df.judged.to_numpy() & held_out)
-    meta = df.iloc[j][["dossier", "id", "split"]].rename(columns={"split": "period"})
+    meta = df.iloc[j][["transcript", "id", "split"]].rename(columns={"split": "period"})
     meta["row"] = j
-    return df, meta[["dossier", "id", "period", "row"]].reset_index(drop=True)
+    return df, meta[["transcript", "id", "period", "row"]].reset_index(drop=True)
 
 
 def model_inputs(cfg, df, rows):
-    """C-only causal context, exact C ids and full-table complete-target routes."""
+    """Causal context, exact classifier ids and full-table complete-target routes."""
     from .coverage import contexts
     f = folders(cfg)
-    ctok = I.CInputs(f["c"] / "tokenizer.json")
-    n = c_run(f["c"])["max_tokens"]
+    ctok = I.ClassifierInputs(f["classifier"] / "tokenizer.json")
+    n = classifier_run(f["classifier"])["max_tokens"]
     ctx, routes = contexts(df, ctok.tok, n)
     return ctx, ctok.build(I.render(df, ctx, rows), n), routes
 
 
 def torch_made_from(cfg, f):
-    """The C model, immutable table, live input rules and library versions used for scores."""
+    """The classifier, immutable table, live input rules and library versions used for scores."""
     from .core import source_hash
-    return {"mode": "c_only", "c": fingerprint(f["c"]), "lines": fingerprint(lines_path(cfg)),
-            "allowlist": fingerprint(cfg.path(cfg["truth"]["allowlist"])), "canonical": links(cfg)[1], **versions(),
-            "code": source_hash("core", "inputs", "model_text", "models", "export", "truth", "trainset", "coverage")}
+    return {"classifier": fingerprint(f["classifier"]), "lines": fingerprint(lines_path(cfg)),
+            "allowlist": fingerprint(cfg.path(cfg["line_labels"]["allowlist"])), "canonical": links(cfg)[1], **versions(),
+            "code": source_hash("core", "inputs", "model_text", "models", "export", "line_labels", "trainset", "coverage")}
 
 
 def torch_scores(cfg, f, df, meta):
-    """Score C for every covered judged key. Rejected inputs have absent logits."""
+    """Score the classifier on every covered judged key. Rejected inputs have absent logits."""
     import pandas as pd
     path = f["out"] / "torch.parquet"
     made_from = torch_made_from(cfg, f)
     if is_current(path, made_from):
         return pd.read_parquet(path)
     import torch
-    from .models import fp32, limit_gpu_memory, load_c, score_c
+    from .models import fp32, limit_gpu_memory, load_classifier, score_classifier
     _, cids, all_routes = model_inputs(cfg, df, meta.row.to_numpy())
     routes = all_routes[meta.row.to_numpy()]
     torch.set_num_threads(6)
@@ -285,16 +284,16 @@ def torch_scores(cfg, f, df, meta):
     limit_gpu_memory(log)
     dev = torch.device("cuda")
     zc = np.full((len(meta), len(I.OUTS)), np.nan, np.float32)
-    covered = np.flatnonzero(routes == "c")
+    covered = np.flatnonzero(routes == "scored")
     if len(covered):
-        zc[covered] = score_c(load_c(f["c"], dev), [cids[k] for k in covered], dev)
+        zc[covered] = score_classifier(load_classifier(f["classifier"], dev), [cids[k] for k in covered], dev)
         torch.cuda.empty_cache()
     if not np.isfinite(zc[covered]).all():
-        raise SystemExit("C returned a non-finite logit")
-    out = meta[["dossier", "id", "period"]].copy()
+        raise SystemExit("the classifier returned a non-finite logit")
+    out = meta[["transcript", "id", "period"]].copy()
     out["coverage"] = routes
     for k, o in enumerate(I.OUTS):
-        out[f"c_{o}"] = zc[:, k]
+        out[f"classifier_{o}"] = zc[:, k]
     out.to_parquet(path, index=False)
     record_inputs(path, made_from)
     return out
@@ -313,8 +312,8 @@ def calibration_sources(cfg, f):
     def mark(path):
         return {"path": str(path), "fingerprint": fingerprint(path), "sha256": sha256(path)}
 
-    return {"torch": fingerprint(f["out"] / "torch.parquet"), "mode": "c_only", "period": "val",
-            "table": mark(table), "hold": mark(hold), "guard_band": C_TOLERANCE,
+    return {"torch": fingerprint(f["out"] / "torch.parquet"), "period": "val",
+            "table": mark(table), "hold": mark(hold), "guard_band": CPU_TOLERANCE,
             "hold_shares": SHARES, "code": source_hash("calibrate", "inputs")}
 
 
@@ -322,15 +321,15 @@ def thresholds_made_from(cfg, f):
     """Validation-only calibration sources, verified against the model's training provenance."""
     current = calibration_sources(cfg, f)
     batch = cfg["export"]["batch"]
-    model = c_run(f["c"])
+    model = classifier_run(f["classifier"])
     recorded = model.get("made_from", {}).get("hold", {}).get(batch)
     inputs = model.get("made_from", {}).get("inputs", {})
     if inputs.get("tables", {}).get(batch) != current["table"]["fingerprint"]:
-        raise SystemExit("selected immutable table differs from the C training provenance")
-    if inputs.get("allowlist") != fingerprint(cfg.path(cfg["truth"]["allowlist"])) or inputs.get("canonical") != links(cfg)[1]:
-        raise SystemExit("selected link rules differ from the C training provenance")
+        raise SystemExit("selected immutable table differs from the classifier's training provenance")
+    if inputs.get("allowlist") != fingerprint(cfg.path(cfg["line_labels"]["allowlist"])) or inputs.get("canonical") != links(cfg)[1]:
+        raise SystemExit("selected link rules differ from the classifier's training provenance")
     if recorded != current["hold"]["fingerprint"] or not recorded:
-        raise SystemExit("selected hold labels differ from the C training provenance")
+        raise SystemExit("selected hold labels differ from the classifier's training provenance")
     return {**current, "model_inputs": model["made_from"]}
 
 
@@ -360,9 +359,9 @@ def set_thresholds(cfg, f, meta, t):
     from .trainset import hold_path
     provenance = thresholds_made_from(cfg, f)
     table = pd.read_parquet(lines_path(cfg))
-    labels = pd.read_parquet(hold_path(cfg, cfg["export"]["batch"]), columns=["dossier", "id", "hold", "sitting", "ban_here"])
+    labels = pd.read_parquet(hold_path(cfg, cfg["export"]["batch"]), columns=["transcript", "id", "hold", "session", "ban_here"])
     out = calibrate(t, meta, table[table.judged].copy(), labels)
-    out.update(coverage_tokens=c_run(f["c"])["max_tokens"], models=model_marks(f), made_from=provenance)
+    out.update(coverage_tokens=classifier_run(f["classifier"])["max_tokens"], models=model_marks(f), made_from=provenance)
     path = f["out"] / "thresholds.json"
     if not path.exists() or json.loads(path.read_text(encoding="utf-8")) != out:
         write_text(path, json.dumps(out, indent=1) + "\n")
@@ -370,16 +369,16 @@ def set_thresholds(cfg, f, meta, t):
 
 # ---------------------------------------------------------------- 3. parity
 
-def pick(t, thr, n, full, files):
+def parity_rows(t, thr, n, full, files):
     """Include every covered target near any named threshold, plus a reproducible sample."""
     rows = np.arange(len(t))
     if files:
-        rows = rows[t.dossier.isin(sorted(t.dossier.unique())[:files]).to_numpy()]
+        rows = rows[t.transcript.isin(sorted(t.transcript.unique())[:files]).to_numpy()]
     if full:
         return rows
     near = np.zeros(len(t), bool)
     for threshold in thr.values():
-        near |= (t.coverage.to_numpy() == "c") & (np.abs(t.c_hold.to_numpy() - threshold) <= NEAR)
+        near |= (t.coverage.to_numpy() == "scored") & (np.abs(t.classifier_hold.to_numpy() - threshold) <= NEAR)
     must = rows[near[rows]]
     rest = np.setdiff1d(rows, must)
     extra = np.random.default_rng(SEED).choice(rest, size=max(0, min(len(rest), n - len(must))), replace=False)
@@ -387,15 +386,15 @@ def pick(t, thr, n, full, files):
 
 
 def ov_scores(cfg, f, df, meta, picked):
-    """Actual C-only CPU logits. Rejected targets never invoke a graph."""
+    """The graph's actual CPU logits. Rejected targets never invoke it."""
     import openvino as ov
-    req = ov.Core().compile_model(f["models"] / "c.xml", "CPU", COMPILE).create_infer_request()
+    req = ov.Core().compile_model(f["models"] / "classifier.xml", "CPU", COMPILE).create_infer_request()
     rows = meta.row.to_numpy()[picked]
     _, cids, all_routes = model_inputs(cfg, df, rows)
     zc = np.full((len(rows), len(I.OUTS)), np.nan, np.float32)
-    with progress("parity (C, CPU)", len(rows), "lines") as advance:
+    with progress("parity (classifier, CPU)", len(rows), "lines") as advance:
         for r, row in enumerate(rows):
-            if all_routes[row] == "c":
+            if all_routes[row] == "scored":
                 ids = cids[r].astype(np.int64)[None]
                 req.infer({"input_ids": ids, "attention_mask": np.ones_like(ids)})
                 zc[r] = req.get_output_tensor(0).data[0]
@@ -404,15 +403,15 @@ def ov_scores(cfg, f, df, meta, picked):
 
 
 def parity(cfg, f, df, meta, t, args):
-    """Compare all eight C outputs and decisions on identical real inputs."""
+    """Compare all eight outputs and decisions on identical real inputs."""
     thr = thresholds(cfg, f)
-    picked = pick(t, thr, args.sample, args.full, args.files)
+    picked = parity_rows(t, thr, args.sample, args.full, args.files)
     zc = ov_scores(cfg, f, df, meta, picked)
     tp = t.iloc[picked].reset_index(drop=True)
-    covered = tp.coverage.to_numpy() == "c"
-    tc = tp[["c_" + o for o in I.OUTS]].to_numpy()
+    covered = tp.coverage.to_numpy() == "scored"
+    tc = tp[["classifier_" + o for o in I.OUTS]].to_numpy()
     if not covered.any() or not np.isfinite(zc[covered]).all():
-        raise SystemExit("parity needs finite real covered C outputs")
+        raise SystemExit("parity needs finite real covered outputs")
     delta = np.abs(zc[covered] - tc[covered])
     maximum = float(delta.max())
     bad = []
@@ -421,23 +420,23 @@ def parity(cfg, f, df, meta, t, args):
         differing = ((a >= threshold) != (b >= threshold)) & (a != threshold)
         if differing.any():
             bad.append({"threshold": name, "count": int(differing.sum())})
-    result = {"scoring": {"mode": "c_only"}, "sampled": len(tp), "covered": int(covered.sum()),
+    result = {"sampled": len(tp), "covered": int(covered.sum()),
               "rejected": int((~covered).sum()), "max_abs_diff": maximum,
               "per_output_max": dict(zip(I.OUTS, map(float, delta.max(axis=0)))), "decision_errors": bad}
     write_text(f["out"] / "parity.json", json.dumps(result, indent=1) + "\n")
-    if maximum > C_TOLERANCE or bad:
-        raise SystemExit(f"C parity failed: error {maximum}, tolerance {C_TOLERANCE}, decisions {bad}")
+    if maximum > CPU_TOLERANCE or bad:
+        raise SystemExit(f"parity failed: error {maximum}, tolerance {CPU_TOLERANCE}, decisions {bad}")
 
 
 def body(cfg, args):
     f = folders(cfg)
-    for k in ("c",):
+    for k in ("classifier",):
         if not f[k].is_dir():
             raise SystemExit(f"[export] {k}: {f[k]} is not a model folder")
     export_graphs(cfg, f)
     df, meta = load_lines(cfg)
     t = torch_scores(cfg, f, df, meta)
-    if not (t[["dossier", "id"]].to_numpy() == meta[["dossier", "id"]].to_numpy()).all():
+    if not (t[["transcript", "id"]].to_numpy() == meta[["transcript", "id"]].to_numpy()).all():
         raise SystemExit("torch.parquet's lines are not the current validation and test lines")
     set_thresholds(cfg, f, meta, t)
     if not args.no_parity:
