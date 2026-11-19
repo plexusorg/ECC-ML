@@ -101,7 +101,7 @@ share = 0.10                            # the other Paper batches
 kinds_share = 0.05                      # the kinds-only batches
 seed = 20261113                         # the random shares' draws
 
-# The base models of C and of SH's line encoder: a Hugging Face repo at a commit sha, copied once into
+# The base model of C: a Hugging Face repo at a commit sha, copied once into
 # data/models/base/<repo>@<revision>/ (`uv run python -m ecc.base fetch`); training reads the copy (ecc.base.path).
 [train.c]
 base = "Roblox/roblox-pii-classifier-v2"
@@ -110,8 +110,7 @@ files = ["config.json", "model.safetensors", "tokenizer.json", "special_tokens_m
          "sentencepiece.bpe.model"]
 tokens = [256]                          # the serving length; preserve the complete current target
 # `train c`: AdamW with this lr and weight decay, a linear warm-up over `warmup` of the steps then a linear decay to 0,
-# gradients clipped to `clip`, `batch` lines a step, a fixed number of epochs and one seed. The teacher folds split the
-# Paper runs into `folds` with `fold_seed`.
+# gradients clipped to `clip`, `batch` lines a step, a fixed number of epochs and one seed.
 epochs = 3
 lr = 1.5e-5
 weight_decay = 0.01
@@ -119,30 +118,6 @@ warmup = 0.06
 clip = 1.0
 batch = 32
 seed = 2
-folds = 2
-fold_seed = 20261113
-[train.sh]
-base = "intfloat/multilingual-e5-small"
-revision = "614241f622f53c4eeff9890bdc4f31cfecc418b3"
-files = ["config.json", "model.safetensors", "tokenizer.json"]
-# `train sh`: distilled at `temperature` from the teacher; AdamW at lr (e5-small), new_lr (the context layers and
-# embeddings) and head_lr (the head and final norm), warm-up then linear decay to 0 over `epochs`; batches of `batch`
-# lines in chunks of `chunk` consecutive lines of one log file. The epoch kept passes the most of the validation lines
-# the C run holds at bundle.toml's hold share `epoch_hold`; training stops `patience` epochs after it.
-layers = 4
-temperature = 2.0
-epochs = 30
-patience = 3
-batch = 512
-chunk = 16
-lr = 1e-4
-new_lr = 5e-4
-head_lr = 1e-3
-weight_decay = 0.01
-warmup = 0.06
-clip = 1.0
-seed = 1
-epoch_hold = "2pct"
 
 # `export` converts the completed C classifier and checks the real CPU graph against Torch.
 [export]

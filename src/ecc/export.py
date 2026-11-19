@@ -6,7 +6,7 @@ incomplete targets before context. Score every covered target with C. Preserve
 raw preparation, model meaning, canonical links and the trained C token budget.
 The named thresholds and the served default are set as src/ecc/calibrate.py states.
 Keep model-held, input-rejected and total traffic counts separate. Never choose
-thresholds from test outcomes. Refuse smoke, fold, research or changed weights.
+thresholds from test outcomes. Refuse smoke, research or changed weights.
 """
 import os
 
@@ -35,7 +35,7 @@ SEED = 20261114
 
 
 def folders(cfg):
-    """The C model and its export slot. Production needs no SH folder."""
+    """The C model and its export slot."""
     e = cfg["export"]
     c = cfg.path(e["c"])
     out = cfg.path(e["out"]) / c.name
@@ -54,8 +54,8 @@ def c_run(folder):
         raise SystemExit(f"{p}: max_tokens {n!r} is not a length of at least 4 tokens")
     if not isinstance(run_.get("run"), str) or not run_["run"]:
         raise SystemExit(f"{p}: `run`, what the run is, is missing")
-    if run_.get("fold") or run_.get("smoke") or run_.get("limit"):
-        raise SystemExit(f"{folder}: refuse to export a teacher fold or smoke run")
+    if run_.get("smoke") or run_.get("limit"):
+        raise SystemExit(f"{folder}: refuse to export a smoke run")
     if run_.get("coverage_tokens") != n:
         raise SystemExit(f"{folder}: coverage_tokens must equal the served max_tokens {n}; rebuild the inputs and retrain")
     return run_
@@ -71,8 +71,8 @@ def pair(f):
         raise SystemExit("C release needs completed training metadata, not a research fixture")
     trained = json.loads(mark.read_text(encoding="utf-8"))
     req = trained.get("request", {})
-    if req.get("smoke") or req.get("limit") or req.get("fold", {}).get("k"):
-        raise SystemExit("refuse a smoke or teacher-fold C model")
+    if req.get("smoke") or req.get("limit"):
+        raise SystemExit("refuse a smoke C model")
     if req.get("code") != source_hash("train", "models", "inputs", "core"):
         raise SystemExit("C training source differs from the recorded source; preserve the trained source")
     if req.get("made_from") != c.get("made_from") or req.get("tokens") != c["max_tokens"]:
@@ -253,11 +253,11 @@ def load_lines(cfg):
 
 def model_inputs(cfg, df, rows):
     """C-only causal context, exact C ids and full-table complete-target routes."""
-    from .coverage import c_contexts
+    from .coverage import contexts
     f = folders(cfg)
     ctok = I.CInputs(f["c"] / "tokenizer.json")
     n = c_run(f["c"])["max_tokens"]
-    ctx, routes = c_contexts(df, ctok.tok, n)
+    ctx, routes = contexts(df, ctok.tok, n)
     return ctx, ctok.build(I.render(df, ctx, rows), n), routes
 
 

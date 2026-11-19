@@ -1,11 +1,10 @@
-"""The base models training starts from, and the C that ranks the training lines.
+"""The base model training starts from, and the C that ranks the training lines.
 
-Each base model ([train.c] for C, [train.sh] for SH's line encoder) is a Hugging Face repo pinned to a commit sha. Its
-copy lives in data/models/base/<repo>@<sha>/ with source.json (repo, revision, each file's size and SHA-256); training
+The base model ([train.c]) is a Hugging Face repo pinned to a commit sha. Its copy lives in data/models/base/<repo>@<sha>/ with source.json (repo, revision, each file's size and SHA-256); training
 reads the copy and never the hub. `path` refuses a copy of another repo or revision, or with a missing or resized
 file. The ranker ([train] ranker) is a trained C folder whose input.json names the base revision it was trained from.
 
-    uv run python -m ecc.base fetch [c|sh]    download a pinned base model that has no copy yet
+    uv run python -m ecc.base fetch [c]       download a pinned base model that has no copy yet
     uv run python -m ecc.base check           every copy's files against their SHA-256
 """
 import argparse
@@ -18,7 +17,7 @@ from pathlib import Path
 
 from .core import log, run, write_text
 
-BASES = ("c", "sh")
+BASES = ("c",)
 
 
 def pinned(cfg, which):

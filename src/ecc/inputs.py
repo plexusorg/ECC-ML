@@ -1,6 +1,6 @@
-"""How a chat line becomes the input of the two v4 models. Training, evaluation, export and the bundle all build their
-inputs here, so the models see in deployment exactly what they were trained on. ECC-Server builds the same inputs from
-the rules the bundle states (bundle.json `context`, `sh`, `c`); `ecc.reference` is a second, plain implementation of
+"""How a chat line becomes the input of the v4 model. Training, evaluation, export and the bundle all build their
+inputs here, so the model sees in deployment exactly what it was trained on. ECC-Server builds the same inputs from
+the rules the bundle states (bundle.json `context`, `c`); `ecc.reference` is a second, plain implementation of
 those rules.
 
 A table of lines (pandas) has the columns run (one stream: one server uptime, over one or more log files), id, time
@@ -10,8 +10,6 @@ within each run.
 
 - The context of a line: the earlier lines of its list (a private message: the pair's messages; a placed line: its
   author's placed lines; any other line: the public lines), the last CTX_LINES of them within CTX_SECONDS.
-- SH reads every line alone (`line_tokens`) once, as a vector, and a small transformer reads the vectors of the context
-  and the line with each one's speaker slot, addressee slot, channel, time gap and position (`sh_features`).
 - C reads the context and the line as one string per line with role names (`render`), tokenized and joined
   (`CInputs.build`), cut from the left to C's length, which is data of the C run (its input.json `max_tokens`).
 
@@ -21,13 +19,12 @@ training text with these functions, and ECC-Server applies the same rules, which
 redacts newly revealed addresses and replaces allowed links. Source records and repeat keys keep the prepared text.
 """
 import collections
-import math
 import re
 
 import numpy as np
 
 KINDS = ["ask_contact", "give_contact", "ask_personal", "give_personal", "off_server", "sexual", "romantic"]
-OUTS = KINDS + ["hold"]                 # the eight outputs of both models; only hold decides
+OUTS = KINDS + ["hold"]                 # the model's eight outputs; only hold decides
 HOLD = OUTS.index("hold")
 PUBLIC = {"chat", "guild", "me", "discord"}         # appended to the public list
 PLACED = {"sign", "book", "item", "tag", "nick"}    # appended to the author's placed list
@@ -35,11 +32,6 @@ PRIVATE = "msg"                                     # appended to the pair's lis
 CHANNELS = ["chat", "guild", "msg", "mail", "me", "nick", "sign", "book", "item", "tag", "muted", "discord"]
 BOS, PAD, EOS = 0, 1, 2
 CTX_LINES, CTX_SECONDS = 30, 1800
-SH_LINE_TOKENS = 48                 # <s> + the first 46 ids of the line string + </s>
-SEQ = CTX_LINES + 1                 # SH's sequence: the context and the line
-SLOT_MAX = SEQ                      # slot numbers are capped at 31
-ADDR_NONE = SEQ + 1                 # the addressee slot of a line that is not a private message
-GAPS = 12                           # gap buckets: 0, then bit_length(seconds) capped at 11
 
 
 # ---------------------------------------------------------------- text preparation
@@ -162,67 +154,6 @@ def contexts(df, n=CTX_LINES, seconds=CTX_SECONDS, accept=None):
             elif c in PUBLIC:
                 public.append(i)
     return out
-
-
-# ---------------------------------------------------------------- SH
-
-def line_string(chan, text):
-    return text if chan == "chat" else f"[{chan}] {text}"
-
-
-def line_tokens(tok, strings):
-    """Each line string alone: <s>, its first SH_LINE_TOKENS - 2 ids, </s>."""
-    out = []
-    for c in range(0, len(strings), 100000):
-        for e in tok.encode_batch(list(strings[c:c + 100000]), add_special_tokens=False):
-            out.append(np.asarray([BOS] + e.ids[:SH_LINE_TOKENS - 2] + [EOS], np.int32))
-    return out
-
-
-def gap_bucket(g):
-    return 0 if g <= 0 else min(GAPS - 1, 1 + int(math.log2(g)))
-
-
-def sh_features(df, ctx, rows):
-    """Per row of `rows`: the row indexes of its sequence (context, then the line last) and their slot, addressee,
-    channel, gap and position features, padded to SEQ (line -1 = padding); n = the sequence's length. df needs account
-    (`keys`) and partner (lowercased) columns. Slots: the line's author is 0; the others are numbered in order of first
-    appearance walking the sequence, each line's speaker before a private message's addressee."""
-    chan, part, acc, sec = df.channel.to_numpy(), df.partner.to_numpy(), df.account.to_numpy(), df.time.to_numpy()
-    cid = {c: k for k, c in enumerate(CHANNELS)}
-    R = len(rows)
-    F = {"line": np.full((R, SEQ), -1, np.int64), "slot": np.zeros((R, SEQ), np.int64),
-         "addr": np.full((R, SEQ), ADDR_NONE, np.int64), "chan": np.zeros((R, SEQ), np.int64),
-         "gap": np.zeros((R, SEQ), np.int64), "pos": np.zeros((R, SEQ), np.int64), "n": np.zeros(R, np.int64)}
-    for r, i in enumerate(rows):
-        names = {acc[i]: 0}
-
-        def name(a):
-            if a not in names:
-                names[a] = len(names)
-            return min(names[a], SLOT_MAX)
-
-        seq = list(ctx[i]) + [i]
-        n = len(seq)
-        F["n"][r] = n
-        for k, j in enumerate(seq):
-            F["line"][r, k] = j
-            F["slot"][r, k] = name(acc[j]) if j != i else 0
-            if chan[j] == PRIVATE:
-                F["addr"][r, k] = name(part[j])
-            F["chan"][r, k] = cid.get(chan[j], 0)
-            F["gap"][r, k] = gap_bucket(sec[i] - sec[j])
-            F["pos"][r, k] = n - 1 - k
-    return F
-
-
-def sh_table(df):
-    """The columns sh_features reads: account = keys(df), partner lowercased, text filled."""
-    sh = df.copy()
-    sh["account"] = keys(df)
-    sh["partner"] = df.partner.fillna("").str.lower()
-    sh["text"] = df.text.fillna("")
-    return sh
 
 
 # ---------------------------------------------------------------- C

@@ -62,7 +62,7 @@ def scored(cfg):
 def system(t):
     """C logits for every judged test key. Rejected targets have no model logits."""
     t = t[t["period"] == "test"]
-    if "coverage" not in t or not t.coverage.isin(["c", "reject"]).all() or any(k.startswith("sh_") for k in t):
+    if "coverage" not in t or not t.coverage.isin(["c", "reject"]).all():
         raise SystemExit("replay requires C-only complete-target scores; run `uv run export`")
     out = t[["dossier", "id", "coverage"]].copy()
     for o in ["hold"] + I.KINDS:

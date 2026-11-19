@@ -164,14 +164,14 @@ def c_example(model_folder, max_tokens):
     import pandas as pd
     import torch
     from .models import load_c, score_c
-    from .coverage import c_contexts
+    from .coverage import contexts
     torch.set_num_threads(6)
     rows, dropped, folded = training_rows(EXAMPLE)
     df = pd.DataFrame(rows).assign(dossier="example", run="example")
     df["text"] = [I.model_text(t, [], "") for t in df.text]
     ctok = I.CInputs(Path(model_folder) / "tokenizer.json")
     n = max_tokens
-    ctx, routes = c_contexts(df, ctok.tok, n)
+    ctx, routes = contexts(df, ctok.tok, n)
     scored = [i for i in range(len(df)) if df.judged[i] and routes[i] == "c"]
     rend = I.render(df, ctx, scored)
     cin = ctok.build(rend, n)

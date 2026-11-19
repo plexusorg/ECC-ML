@@ -76,7 +76,7 @@ def check_scores(name, df, prefixes, period=True):
         raise SystemExit(f"{name}: a line is scored twice")
     if period and not df.period.isin(PERIODS).all():
         raise SystemExit(f"{name}: a scored line's period is neither val nor test")
-    if not df.coverage.isin(["cascade", "c", "reject"]).all():
+    if not df.coverage.isin(["c", "reject"]).all():
         raise SystemExit(f"{name}: invalid coverage route")
     if not np.isfinite(df.loc[df.coverage != "reject", [f"{p}_{o}" for p in prefixes for o in OUTS]].to_numpy()).all():
         raise SystemExit(f"{name}: non-finite model score")

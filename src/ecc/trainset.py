@@ -1,4 +1,4 @@
-"""uv run trainset: the inputs C and SH train on, built by ecc.inputs, the code export, the bundle and its vectors
+"""uv run trainset: the inputs C trains on, built by ecc.inputs, the code export, the bundle and its vectors
 build the served inputs with, so training sees what ECC-Server feeds the models.
 
 The Paper table is every row of the [train] owner batches together in arrival order: by run, each run's log files in
@@ -11,17 +11,14 @@ what the models read live: meaning normalization, redaction of revealed addresse
 default allowlist allows replaced by links.canonical (inputs.model_text, export.links).
 
 Writes <[train] out>/inputs/:
-- paper.parquet: the Paper table's rows in order (batch, dossier, id, run); row k is line k of SH's line ids and of
-  every context.
-- lines.parquet: the lines the models train and are scored on, in training row order: the judged Paper rows in Paper
+- paper.parquet: the Paper table's rows in order (batch, dossier, id, run, coverage); row k is line k of every context.
+- lines.parquet: the lines the model trains and is scored on, in training row order: the judged Paper rows in Paper
   order, then every row of the kinds-only batches. batch, dossier, id, run, paper_row (-1 for a kinds-only line),
-  split, coverage (cascade, c or reject), the seven kinds, unsure_masked, left_out, kmask (out of the kind loss:
+  split, coverage (c or reject), the seven kinds, unsure_masked, left_out, kmask (out of the kind loss:
   unsure_masked, left_out, -1 on every kind or rejected coverage). Rejected rows retain their keys but train no loss.
-- sh-tokens.npy, sh-tokens.offsets.npy: SH's line ids of every Paper row (row k: tokens[offsets[k]:offsets[k + 1]]).
-- sh-features.npz: per judged Paper line (the first rows of lines.parquet): line (the Paper rows of its context and
-  itself, -1 padding), slot, addr, chan, gap, pos (SEQ columns each) and n.
-- c-<N>.npy, c-<N>.offsets.npy: C's input ids cut to N tokens for every line of lines.parquet, for each N of
-  [train.c] tokens and the length the ranker ([train] ranker) was trained at.
+- c-<N>.npy, c-<N>.offsets.npy: C's input ids cut to N tokens for every line of lines.parquet (row k:
+  ids[offsets[k]:offsets[k + 1]]), for each N of [train.c] tokens and the length the ranker ([train] ranker) was
+  trained at.
 - inputs.json: what the inputs were made from, the lengths and the counts. The step does nothing when it is current.
 
 With --rank, the ranker (the trained C of [train] ranker, at the length it was trained at, bf16) scores the candidates,
@@ -51,8 +48,6 @@ from . import inputs as I
 from .core import fingerprint, is_current, log, record_inputs, run, source_hash, write_text
 
 CHUNK = 50000           # lines rendered and tokenised at a time
-FEATURES = {"line": np.int32, "slot": np.int8, "addr": np.int8, "chan": np.int8, "gap": np.int8, "pos": np.int8,
-            "n": np.int8}
 COLS = ["dossier", "run", "id", "time", "channel", "partner", "speaker", "account", "text", "judged", "split",
         "unsure_masked", "left_out"] + I.KINDS
 RANK_TOKENS = 65536     # tokens in one ranking batch
@@ -90,14 +85,14 @@ def table_path(cfg, batch):
 
 
 def load(cfg, batch, allow, canon):
-    """A batch's truth table with the text the models read."""
+    """A batch's truth table with the text the model reads ('' for a line with no text)."""
     import pandas as pd
     import pyarrow.parquet as pq
     path = table_path(cfg, batch)
     names = pq.ParquetFile(path).schema_arrow.names
     raw_cols = ["raw_text"] if "raw_text" in names else ["row"]
     df = with_raw(cfg, pd.read_parquet(path, columns=COLS + raw_cols))
-    df["text"] = [I.model_text(t, allow, canon) if isinstance(t, str) else t for t in df.text]
+    df["text"] = [I.model_text(t, allow, canon) if isinstance(t, str) else "" for t in df.text]
     df.insert(0, "batch", batch)
     return df
 
@@ -279,28 +274,15 @@ def build(cfg, out, made_from):
     builder = I.CInputs(base_path(cfg, "c") / "tokenizer.json")
     writers = {n: Ragged(out / f"c-{n}.npy") for n in ns}
 
-    # the Paper table: SH's line ids of every row, SH's features and C's ids of every judged row
-    df = I.sh_table(paper_table(cfg, allow, canon))
-    tok = I.tokenizer(base_path(cfg, "sh") / "tokenizer.json")
-    ctx, routes = contexts(df, builder.tok, tok, made_from["coverage_tokens"])
+    # the Paper table: C's ids of every judged row
+    df = paper_table(cfg, allow, canon)
+    ctx, routes = contexts(df, builder.tok, made_from["coverage_tokens"])
     df["coverage"] = routes
     log.info("Paper table: %s rows of %s, %s runs (%.0f s)", f"{len(df):,}", ", ".join(cfg["train"]["owner"]),
              f"{df.run.nunique():,}", time.perf_counter() - t0)
     write_parquet(pa.Table.from_pandas(df[["batch", "dossier", "id", "run", "coverage"]], preserve_index=False),
                   out / "paper.parquet")
-    lt = Ragged(out / "sh-tokens.npy")
-    lt.add(I.line_tokens(tok, [I.line_string(c, t) for c, t in zip(df.channel, df.text)]))
-    lt.close()
     judged = np.flatnonzero(df.judged.to_numpy())
-    feats = {k: np.zeros((len(judged), I.SEQ) if k != "n" else len(judged), t) for k, t in FEATURES.items()}
-    for i in range(0, len(judged), CHUNK):
-        f = I.sh_features(df, ctx, judged[i:i + CHUNK])
-        for k in FEATURES:
-            feats[k][i:i + CHUNK] = f[k]
-    np.savez(out / "sh-features.npz", **feats)
-    del feats
-    log.info("SH: line ids of %s rows, features of %s judged lines (%.0f s)", f"{len(df):,}", f"{len(judged):,}",
-             time.perf_counter() - t0)
     write_c(writers, df, ctx, judged, builder, "Paper")
     metas = [meta(df, judged, True)]
     paper_rows = len(df)
@@ -308,9 +290,9 @@ def build(cfg, out, made_from):
 
     # the kinds-only batches: C's ids of every row
     for b in cfg["train"]["kinds_only"]:
-        d = I.sh_table(load(cfg, b, allow, canon))
+        d = load(cfg, b, allow, canon)
         rows = np.arange(len(d))
-        cctx, routes = contexts(d, builder.tok, tok, made_from["coverage_tokens"])
+        cctx, routes = contexts(d, builder.tok, made_from["coverage_tokens"])
         d["coverage"] = routes
         write_c(writers, d, cctx, rows, builder, b)
         metas.append(meta(d, rows, False))
@@ -512,8 +494,8 @@ def made(cfg):
                           for b in cfg["train"]["owner"]},
             "allowlist": fingerprint(cfg.path(cfg["truth"]["allowlist"])), "canonical": links(cfg)[1],
             "raw_messages": fingerprint(cfg.path(cfg["dossier"]["messages"])),
-            "c_base": pinned(cfg, "c")[:2], "sh_base": pinned(cfg, "sh")[:2], "c_tokens": lengths(cfg),
-            "context": [I.CTX_LINES, I.CTX_SECONDS], "sh_line_tokens": I.SH_LINE_TOKENS,
+            "c_base": pinned(cfg, "c")[:2], "c_tokens": lengths(cfg),
+            "context": [I.CTX_LINES, I.CTX_SECONDS],
             "coverage_tokens": int(cfg["train"]["c"]["tokens"][0]),
             "code": source_hash("core", "inputs", "model_text", "trainset", "export", "truth", "base", "coverage")}
 

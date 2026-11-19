@@ -58,7 +58,7 @@ def calibrate(t, meta, judged, labels):
     key = ["dossier", "id"]
     if t.duplicated(key).any() or not t[key + ["period"]].equals(meta[key + ["period"]]):
         raise SystemExit("calibration scores do not contain the exact validation/test keys and periods")
-    if not t.coverage.isin(["c", "reject"]).all() or any(c.startswith("sh_") for c in t):
+    if not t.coverage.isin(["c", "reject"]).all():
         raise SystemExit("calibration requires explicit C-only scores")
     expected = judged[judged.split.isin(["val", "test"])][key + ["split"]].rename(columns={"split": "period"})
     if not meta[key + ["period"]].reset_index(drop=True).equals(expected.reset_index(drop=True)):
