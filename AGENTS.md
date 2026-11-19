@@ -6,11 +6,12 @@ public (github.com/plexusorg/ECC-ML); its data, policy and model are private.
 ## Where things go
 
 - `data/` is the private folder: everything that cannot be rebuilt, and everything private. That is the labelled data
-  (`label/`, the merged labels, roles, windows and corrections, `label-history/`), the raw chat logs, the message table
-  the labels point into, the case and synthetic sets, the policy, the prompts, the term lists, the decision thresholds
-  and `data/local.toml`. It is gitignored and backed up by `uv run backup`, all but the downloaded base model in
-  `data/models/base/`. Run the backup only when the owner
-  asks for one; each backup adds its changed archives to the backup repository for good.
+  (`v4/`: the reader batches with their reads and hold labels, and the selected line-label tables; the owner's rulings
+  in `rulings/`; earlier versions in `label-history/`), the raw chat logs (`raw/`), ECC-Server's records (`record/`),
+  the policy, the readers' questions, the judge's texts and the bundle settings (`v4/`), the trained ranker and
+  `data/local.toml`. It is gitignored and backed up by `uv run backup`, all but the downloaded base model in
+  `data/models/base/`. Run the backup only when the owner asks for one; each backup adds its changed archives to the
+  backup repository for good.
 - The work folder (`[paths] work` in `data/local.toml`, outside the repository) is the scratch space: everything the
   pipeline rebuilds (models, bundles, eval scores, the train and val tables, logs, tools),
   experiments, and notes in `notes/`. Nothing in it is backed up. Delete an experiment when it ends, and a note when
@@ -20,8 +21,8 @@ public (github.com/plexusorg/ECC-ML); its data, policy and model are private.
 - Code goes in `src/`. Configuration names folders, not lists of files: a case set is a folder, and the code reads
   what is in it.
 - Never work in a session scratchpad or temp folder; it has been wiped mid-task more than once.
-- Anything that would help someone evade or reproduce the filter stays in `data/`: the policy, prompts, thresholds,
-  term lists, case, attack and synthetic sets, and measured model gaps. Code and the README are public.
+- Anything that would help someone evade or reproduce the filter stays in `data/`: the policy, the readers' questions,
+  the judge's texts and cases, the owner's rulings, thresholds, and measured model gaps. Code and the README are public.
 - Specs and working documents are not kept in the repository. Plans, progress and open decisions go in the handoff
   (`notes/HANDOFF.md` in the work folder); what the system does is documented by the README and the code. `docs/` is
   gitignored and holds only the public web pages (the welfare and safety pages).
