@@ -49,9 +49,9 @@ Ctrl+C stops a step and keeps all finished work. Run the same command again to c
 | Path | Contents |
 | --- | --- |
 | `src/ecc/` | The steps. |
-| `data/` | Private: gitignored, backed up whole to Telesphorepo. Everything the pipeline cannot rebuild. |
+| `data/` | Private: gitignored, backed up to Telesphorepo less the base model. Everything the pipeline cannot rebuild. |
 | `data/raw/` | The chat logs: the Total Freedom server logs (`tf/`, `tf-old/`) and Creayun's Discord exports (`creayun/`). |
-| `data/policy.md` | The rulebook. The slow check reads it. |
+| `data/policy.md` | The owner's written rules. No step reads it: the readers answer their questions, and the slow check rules by the owner's rulings. |
 | `data/v4/` | The v4 reader batches (`batches/`: parts, reads, hold labels), the selected line-label tables, the readers' questions, and what the bundle is built from besides the model: its settings and the judge's texts (`data/v4/README.md`). |
 | `data/models/base/<repo>@<sha>/` | The classifier's base model at its pinned commit (base model, below). Not backed up: `ecc.base fetch` downloads it. |
 | `data/v4/models/ranker/` | The trained classifier that ranks the training lines (`[train] ranker`); its `input.json` holds its base revision and `trained_tokens`. |
