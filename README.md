@@ -12,8 +12,9 @@ trainset -> train -> export -> eval -> bundle -> promote
 ## Setup
 
 1. Install [uv](https://docs.astral.sh/uv/), then run `uv sync`. The project requires Python 3.13 and its Unicode 15.1 tables.
-2. Private data lives in `data/` (gitignored, backed up whole). On a new machine, `uv run restore` fills it from the
-   newest backup (see backup), including `data/local.toml`. The chat logs are in `data/raw/`. What the pipeline
+2. Private data lives in `data/` (gitignored, backed up). On a new machine, `uv run restore` fills it from the
+   newest backup (see backup), including `data/local.toml`; then `uv run python -m ecc.base fetch` downloads the base
+   model, which the backup leaves out. The chat logs are in `data/raw/`. What the pipeline
    rebuilds (models, bundles, eval scores, the train and val tables, logs, tools) goes to a work folder outside the
    repository, never backed up. `data/local.toml` holds the machine's paths:
 
@@ -52,7 +53,7 @@ Ctrl+C stops a step and keeps all finished work. Run the same command again to c
 | `data/raw/` | The chat logs: the Total Freedom server logs (`tf/`, `tf-old/`) and Creayun's Discord exports (`creayun/`). |
 | `data/policy.md` | The rulebook. The slow check reads it. |
 | `data/v4/` | The v4 reader batches (`batches/`: parts, reads, hold labels), the selected line-label tables, the readers' questions, and what the bundle is built from besides the model: its settings and the judge's texts (`data/v4/README.md`). |
-| `data/models/base/<repo>@<sha>/` | The classifier's base model at its pinned commit (base model, below). |
+| `data/models/base/<repo>@<sha>/` | The classifier's base model at its pinned commit (base model, below). Not backed up: `ecc.base fetch` downloads it. |
 | `data/v4/models/ranker/` | The trained classifier that ranks the training lines (`[train] ranker`); its `input.json` holds its base revision and `trained_tokens`. |
 | `data/rulings/` | The owner's saved rulings, their reviewed derivatives and the scripts that built the ruling pages. Select the judge's rulings with `[bundle] rulings`. |
 | `data/local.toml` | This machine's paths and private settings. |
@@ -439,7 +440,8 @@ last). That is the whole deployment: every ECC-Server picks the new bundle up at
 
 ## backup
 
-`uv run backup` copies the whole `data/` folder to the private `ecc-data` raw repository on Telesphorepo
+`uv run backup` copies the `data/` folder, less the base model in `data/models/base/` (`uv run python -m ecc.base
+fetch` downloads it again), to the private `ecc-data` raw repository on Telesphorepo
 (`telesphorepo.toml`) as gzipped tars and `manifest.json` with each file's SHA-256, size and modification time. A
 folder of at most 64 MiB is one tar; a larger one is split into its subfolders by the same rule, one tar per file over
 64 MiB, and one for its other files, so a change uploads only the tar that holds it. The work folder and `.env` are

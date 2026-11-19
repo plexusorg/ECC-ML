@@ -1,5 +1,5 @@
 # Module-ECC pipeline settings. Every step reads this file; no step needs flags for the normal run.
-# data/ is the private folder (gitignored, backed up whole by `uv run backup`): chat logs, labels, case sets, the
+# data/ is the private folder (gitignored, backed up by `uv run backup`): chat logs, labels, case sets, the
 # policy and prompts, the decision thresholds and data/local.toml (this machine's paths and private settings; it
 # overrides anything here). What the pipeline rebuilds goes to the work folder, [paths] work in data/local.toml,
 # outside the repository: models, bundles, eval scores, the train and val tables, logs and tools. Credentials are in

@@ -1,6 +1,6 @@
-"""uv run backup: copy the whole data folder (the private folder; everything the pipeline cannot rebuild) to the
-ecc-data raw repository on Telesphorepo (telesphorepo.toml), with the telesphorepo CLI. `uv run restore`
-(ecc.restore) brings it back. What the pipeline rebuilds lives in the work folder ([paths] work) and is never backed
+"""uv run backup: copy the data folder (the private folder; everything the pipeline cannot rebuild), less the base
+model (SKIPPED), to the ecc-data raw repository on Telesphorepo (telesphorepo.toml), with the telesphorepo CLI.
+`uv run restore` (ecc.restore) brings it back. What the pipeline rebuilds lives in the work folder ([paths] work) and is never backed
 up.
 
 The repository holds one file per path, and a publish over a path replaces it. So each backup goes to a folder of
@@ -63,6 +63,9 @@ from .core import REPO, log, run, write_text
 
 # Credentials never leave this machine; .env belongs in the repository folder, never in data/.
 SECRETS = {".env"}
+# Folders under the data folder that are left out: the pinned base model, which `uv run python -m ecc.base fetch`
+# downloads again.
+SKIPPED = {"models/base"}
 FILES = "files.tar.gz"  # the unit of a split folder's own small files
 UNIT = 64 << 20         # the most file bytes a folder unit holds before it is split
 PART = 256 << 20        # the largest file one publish uploads
@@ -157,12 +160,18 @@ def units(cfg):
             raise SystemExit(f"two units of the data folder are both named {name}; rename the folder or file")
         out[name] = files
 
+    def kept(p):
+        rel = p.relative_to(cfg.data).as_posix()
+        return not any(rel == s or rel.startswith(s + "/") for s in SKIPPED)
+
     def walk(folder):
         rel = folder.relative_to(cfg.data).as_posix() if folder != cfg.data else ""
         small = []
         for p in sorted(folder.iterdir()):
+            if not kept(p):
+                continue
             if p.is_dir():
-                files = sorted(f for f in p.rglob("*") if f.is_file())
+                files = sorted(f for f in p.rglob("*") if f.is_file() and kept(f))
                 if not files:
                     continue
                 if sum(f.stat().st_size for f in files) <= UNIT:
