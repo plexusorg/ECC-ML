@@ -8,8 +8,8 @@ public (github.com/plexusorg/ECC-ML); its data, policy and model are private.
 - `data/` is the private folder: everything that cannot be rebuilt, and everything private. That is the labelled data
   (`label/`, the merged labels, roles, windows and corrections, `label-history/`), the raw chat logs, the message table
   the labels point into, the case and synthetic sets, the policy, the prompts, the term lists, the decision thresholds
-  and `data/local.toml`. It is gitignored and backed up whole by `uv run backup`; run the backup after every change to
-  it.
+  and `data/local.toml`. It is gitignored and backed up whole by `uv run backup`. Run the backup only when the owner
+  asks for one; each backup adds its changed archives to the backup repository for good.
 - The work folder (`[paths] work` in `data/local.toml`, outside the repository) is the scratch space: everything the
   pipeline rebuilds (models, bundles, eval scores, the train and val tables, logs, tools),
   experiments, and notes in `notes/`. Nothing in it is backed up. Delete an experiment when it ends, and a note when

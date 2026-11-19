@@ -178,7 +178,7 @@ judge reads and the sessions the owner ruled, then from them and the judge's rea
 `data/v4/batches/<batch>/hold.parquet` (transcript, id, session, session_ruling, session_source, hold, ban_here). It
 writes `<work>/labels/cases.json`, `<work>/labels/owner.parquet` and `<work>/labels/sessions.parquet` (every session's
 ruling and `by` line). The `hold.parquet` it replaces is first copied to
-`data/label-history/hold-<the run's time>/<batch>/`; run `uv run backup` after.
+`data/label-history/hold-<the run's time>/<batch>/`.
 
 - **The owner's sessions.** `[labels] rulings` lists his rulings files in order; the first that rules a session gives
   its ruling (block and warn are hold, no ban is not ban) and its `by` (when it names none, the next file with the same
@@ -456,8 +456,8 @@ uploads every archive.
 An archive over 256 MiB goes up in parts of 256 MiB (`<archive>.000`, `.001`, ...), one publish each, listed in the
 manifest with their SHA-256: a publish session ends 15 minutes after it starts (the server's `publish.session_ttl`)
 and one upload may not exceed 2 GiB (`max_upload_size`), so a large archive in one publish fails with "Unauthorized:
-publishing needs a publish session". Every line telesphorepo prints goes to the backup's log. Run it after every
-change to `data/`. `--dry-run` builds the archives and the manifest in `<work>/backup-out/` and logs what it would
+publishing needs a publish session". Every line telesphorepo prints goes to the backup's log. The owner decides
+when to run it. `--dry-run` builds the archives and the manifest in `<work>/backup-out/` and logs what it would
 upload, without publishing.
 
 `uv run restore` brings the newest backup back (`--backup backups/<UTC time>` for another one). It downloads with
