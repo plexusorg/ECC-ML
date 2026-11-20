@@ -98,17 +98,20 @@ def private(cfg):
 
 # ---------------------------------------------------------------- the judge's texts
 
-def judge_fixed(cfg):
-    """The fixed strings of a judge call: the question and the answer format cut from judge-v1.md, the added sentence
-    and the separators from prompt.json."""
-    j = private(cfg) / "judge"
-    src = (j / "judge-v1.md").read_text(encoding="utf-8")
+def judge_v1(cfg):
+    """(question, answer format) cut from judge-v1.md: the texts the label reads were made with."""
+    src = (private(cfg) / "judge" / "judge-v1.md").read_text(encoding="utf-8")
     q = src.split("## Question", 1)[1].split("## Answer format", 1)
-    question = q[0].split("\n", 1)[1].strip()
-    fmt = q[1].split("## For whoever runs", 1)[0].strip()
-    p = json.loads((j / "prompt.json").read_text(encoding="utf-8"))
+    return q[0].split("\n", 1)[1].strip(), q[1].split("## For whoever runs", 1)[0].strip()
+
+
+def judge_fixed(cfg):
+    """The fixed strings of a served judge call: the question from judge-v1.md, then from prompt.json the added
+    sentence, the separators and the comparison paragraph that starts the answer format, then judge-v1.md's format."""
+    question, fmt = judge_v1(cfg)
+    p = json.loads((private(cfg) / "judge" / "prompt.json").read_text(encoding="utf-8"))
     return {"QUESTION": question, "ADDED": p["ADDED"], "SEP_CASES": p["SEP_CASES"], "BLOCK_SEP": p["BLOCK_SEP"],
-            "SEP_NEW": p["SEP_NEW"], "SEP_FMT": p["SEP_FMT"], "FORMAT": fmt}
+            "SEP_NEW": p["SEP_NEW"], "SEP_FMT": p["SEP_FMT"], "FORMAT": p["COMPARE"] + "\n\n" + fmt}
 
 
 def judge_examples(cfg):
